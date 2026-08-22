@@ -1,0 +1,64 @@
+{
+  "info": {
+    "name": "Finance ERP API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"admin@financeerp.local\",\"password\":\"password\"}"
+            },
+            "url": "{{baseUrl}}/auth/login"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json=pm.response.json();",
+                  "if(json.data?.token) pm.environment.set('token', json.data.token);"
+                ]
+              }
+            }
+          ]
+        },
+        { "name": "Me", "request": { "method": "GET", "url": "{{baseUrl}}/auth/me" } }
+      ]
+    },
+    {
+      "name": "Master",
+      "item": [
+        { "name": "Accounts", "request": { "method": "GET", "url": "{{baseUrl}}/accounts" } },
+        { "name": "Customers", "request": { "method": "GET", "url": "{{baseUrl}}/customers" } },
+        { "name": "Suppliers", "request": { "method": "GET", "url": "{{baseUrl}}/suppliers" } },
+        { "name": "Items", "request": { "method": "GET", "url": "{{baseUrl}}/items" } }
+      ]
+    },
+    {
+      "name": "Accounting",
+      "item": [
+        {
+          "name": "Trial Balance",
+          "request": { "method": "GET", "url": "{{baseUrl}}/reports/trial-balance" }
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{baseUrl}}/health" }
+    }
+  ]
+}

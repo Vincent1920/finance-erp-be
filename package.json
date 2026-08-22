@@ -1,0 +1,33 @@
+{
+  "name": "finance-erp-be",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch index.ts",
+    "start": "bun index.ts",
+    "typecheck": "bunx tsc --noEmit",
+    "migrate": "bun database/migrate.ts",
+    "migrate:rollback": "bun database/rollback.ts",
+    "db:seed": "bun database/seed.ts",
+    "db:reset": "bun database/reset.ts",
+    "test": "bun test",
+    "format": "prettier --write \"**/*.{ts,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,json,md}\""
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^17.2.1",
+    "hono": "^4.9.4",
+    "hono-rate-limiter": "^0.4.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.14.3",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/jsonwebtoken": "^9.0.10",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.2"
+  }
+}
