@@ -22,6 +22,12 @@ export const accountingPeriodSchema = z
 export const customerSchema = z.object({
   code: code.max(30),
   name,
+  currency: z
+    .string()
+    .trim()
+    .length(3)
+    .transform((value) => value.toUpperCase())
+    .default('IDR'),
   tax_number: z.string().trim().max(50).nullable().optional(),
   email: z.email().nullable().optional(),
   phone: z.string().trim().max(50).nullable().optional(),
@@ -57,6 +63,11 @@ export const accountSchema = z.object({
   is_posting: z.boolean().default(true),
   is_active: active,
   allow_manual_journal: z.boolean().default(true),
+  cash_flow_category: z
+    .enum(['operating', 'investing', 'financing', 'non_cash'])
+    .nullable()
+    .optional(),
+  report_group: z.string().trim().max(100).nullable().optional(),
 })
 
 export const itemSchema = z.object({
@@ -115,7 +126,9 @@ export const projectSchema = z
     customer_id: nullableId,
     start_date: date.nullable().optional(),
     end_date: date.nullable().optional(),
-    status: z.enum(['active', 'on_hold', 'completed', 'cancelled', 'inactive']).default('active'),
+    status: z
+      .enum(['planned', 'active', 'on_hold', 'completed', 'cancelled', 'inactive'])
+      .default('planned'),
     budget: z.coerce.number().nonnegative().default(0),
     description: z.string().trim().max(5000).nullable().optional(),
   })
@@ -129,7 +142,11 @@ export const bankAccountSchema = z.object({
   bank_name: name.max(150),
   account_number: z.string().trim().min(2).max(100),
   account_name: name.max(150),
-  currency: z.string().trim().length(3).transform((value) => value.toUpperCase()),
+  currency: z
+    .string()
+    .trim()
+    .length(3)
+    .transform((value) => value.toUpperCase()),
   gl_account_id: z.coerce.number().int().positive(),
   opening_balance: z.coerce.number().default(0),
   is_active: active,

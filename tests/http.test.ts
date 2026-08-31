@@ -13,6 +13,25 @@ describe('HTTP smoke tests', () => {
     const response = await app.request('/api/dashboard/summary')
     expect(response.status).toBe(401)
   })
+  for (const endpoint of [
+    '/api/accounting-periods',
+    '/api/warehouses',
+    '/api/units',
+    '/api/tax-codes',
+    '/api/cost-centers',
+    '/api/projects',
+    '/api/bank-accounts',
+    '/api/inventory/stock',
+    '/api/users',
+    '/api/roles',
+    '/api/permissions',
+    '/api/settings',
+  ]) {
+    test(`${endpoint} is registered and protected`, async () => {
+      const response = await app.request(endpoint)
+      expect(response.status).toBe(401)
+    })
+  }
   test('health endpoint responds even when database is unavailable', async () => {
     const response = await app.request('/api/health'),
       body = (await response.json()) as { success: boolean; service: string; database: string }

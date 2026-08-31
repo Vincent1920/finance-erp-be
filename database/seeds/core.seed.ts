@@ -3,18 +3,6 @@ import type { RowDataPacket } from 'mysql2/promise'
 import { hashPassword } from '../../utils/password'
 import type { SeedConnection } from './types'
 
-const roles = [
-  ['Super Admin', 'super-admin'],
-  ['Finance Manager', 'finance-manager'],
-  ['Accountant', 'accountant'],
-  ['AR Staff', 'ar-staff'],
-  ['AP Staff', 'ap-staff'],
-  ['Sales', 'sales'],
-  ['Purchasing', 'purchasing'],
-  ['Inventory', 'inventory'],
-  ['Auditor', 'auditor'],
-] as const
-
 const modules = [
   'dashboard',
   'global-search',
@@ -111,59 +99,7 @@ const actions = [
   'restore',
 ] as const
 
-const financeModules = modules.filter(
-  (module) =>
-    ![
-      'users',
-      'roles',
-      'error-logs',
-      'backups',
-      'document-templates',
-      'imports',
-      'exports',
-    ].includes(module),
-)
-
-const standardActions = actions.filter(
-  (action) =>
-    ![
-      'close_period',
-      'reopen_period',
-      'lock',
-      'reset_password',
-      'restore',
-    ].includes(action),
-)
-
-async function grantPermissions(
-  connection: SeedConnection,
-  roleSlug: string,
-  allowedModules: readonly string[],
-  allowedActions: readonly string[],
-) {
-  for (const module of allowedModules) {
-    for (const action of allowedActions) {
-      await connection.execute(
-        `INSERT IGNORE INTO role_permissions (role_id, permission_id)
-         SELECT r.id, p.id
-           FROM roles r
-           JOIN permissions p
-             ON p.module = ?
-            AND p.action = ?
-          WHERE r.slug = ?`,
-        [module, action, roleSlug],
-      )
-    }
-  }
-}
-
 export async function seedCore(connection: SeedConnection) {
-  /*
-   * =========================================================
-   * COMPANY
-   * =========================================================
-   */
-
   await connection.execute(
     `INSERT INTO companies (
        id,
@@ -180,34 +116,27 @@ export async function seedCore(connection: SeedConnection) {
        1
      )
      ON DUPLICATE KEY UPDATE
-       id = id`,
+       name = VALUES(name),
+       legal_name = VALUES(legal_name),
+       base_currency = VALUES(base_currency),
+       fiscal_year_start = VALUES(fiscal_year_start)`,
   )
 
-  /*
-   * =========================================================
-   * ROLES
-   * =========================================================
-   */
-
-  for (const [name, slug] of roles) {
-    await connection.execute(
-      `INSERT INTO roles (
-         name,
-         slug,
-         is_system
-       )
-       VALUES (?, ?, TRUE)
-       ON DUPLICATE KEY UPDATE
-         is_system = TRUE`,
-      [name, slug],
-    )
-  }
-
-  /*
-   * =========================================================
-   * PERMISSIONS
-   * =========================================================
-   */
+  await connection.execute(
+    `INSERT INTO roles (
+       name,
+       slug,
+       is_system
+     )
+     VALUES (
+       'Super Admin',
+       'super-admin',
+       TRUE
+     )
+     ON DUPLICATE KEY UPDATE
+       name = VALUES(name),
+       is_system = TRUE`,
+  )
 
   for (const module of modules) {
     for (const action of actions) {
@@ -219,99 +148,12 @@ export async function seedCore(connection: SeedConnection) {
            slug
          )
          VALUES (?, ?, ?, ?)`,
-        [
-          module,
-          action,
-          `${action} ${module}`,
-          `${module}.${action}`,
-        ],
+        [module, action, `${action} ${module}`, `${module}.${action}`],
       )
     }
   }
 
-  /*
-   * =========================================================
-   * PASSWORD HASH
-   * =========================================================
-   */
-
-  const initialPasswordHash = await hashPassword('password')
-  const vincentPasswordHash = await hashPassword('vincent')
-
-  /*
-   * =========================================================
-   * DEFAULT SUPER ADMIN
-   * =========================================================
-   *
-   * Email:
-   * admin@financeerp.local
-   *
-   * Password:
-   * password
-   */
-
-  await connection.execute(
-    `INSERT INTO users (
-       company_id,
-       name,
-       email,
-       password,
-       status,
-       password_changed_at
-     )
-     VALUES (
-       1,
-       'Super Admin',
-       'admin@financeerp.local',
-       ?,
-       'active',
-       CURRENT_TIMESTAMP
-     )
-     ON DUPLICATE KEY UPDATE
-       name = VALUES(name),
-       company_id = VALUES(company_id),
-       status = 'active'`,
-    [initialPasswordHash],
-  )
-
-  const [adminRows] = await connection.execute<
-    (RowDataPacket & { id: number })[]
-  >(
-    `SELECT id
-       FROM users
-      WHERE email = ?
-      LIMIT 1`,
-    ['admin@financeerp.local'],
-  )
-
-  const adminId = adminRows[0]?.id
-
-  if (!adminId) {
-    throw new Error('Seeder gagal menemukan akun Super Admin')
-  }
-
-  await connection.execute(
-    `INSERT IGNORE INTO user_roles (
-       user_id,
-       role_id
-     )
-     SELECT ?, id
-       FROM roles
-      WHERE slug = 'super-admin'`,
-    [adminId],
-  )
-
-  /*
-   * =========================================================
-   * VINCENT DEVELOPMENT SUPER ADMIN
-   * =========================================================
-   *
-   * Email:
-   * vincentluhulima@gmail.com
-   *
-   * Password:
-   * vincent
-   */
+  const vincentPasswordHash = await hashPassword('vincent123')
 
   await connection.execute(
     `INSERT INTO users (
@@ -331,10 +173,11 @@ export async function seedCore(connection: SeedConnection) {
        CURRENT_TIMESTAMP
      )
      ON DUPLICATE KEY UPDATE
-       name = VALUES(name),
        company_id = VALUES(company_id),
+       name = VALUES(name),
        password = VALUES(password),
-       status = 'active'`,
+       status = VALUES(status),
+       password_changed_at = CURRENT_TIMESTAMP`,
     [vincentPasswordHash],
   )
 
@@ -355,21 +198,22 @@ export async function seedCore(connection: SeedConnection) {
   }
 
   await connection.execute(
-    `INSERT IGNORE INTO user_roles (
+    `DELETE FROM user_roles
+      WHERE user_id = ?`,
+    [vincentId],
+  )
+
+  await connection.execute(
+    `INSERT INTO user_roles (
        user_id,
        role_id
      )
      SELECT ?, id
        FROM roles
-      WHERE slug = 'super-admin'`,
+      WHERE slug = 'super-admin'
+      LIMIT 1`,
     [vincentId],
   )
-
-  /*
-   * =========================================================
-   * SUPER ADMIN PERMISSIONS
-   * =========================================================
-   */
 
   await connection.execute(
     `INSERT IGNORE INTO role_permissions (
@@ -382,241 +226,9 @@ export async function seedCore(connection: SeedConnection) {
       WHERE r.slug = 'super-admin'`,
   )
 
-  /*
-   * =========================================================
-   * FINANCE MANAGER
-   * =========================================================
-   */
-
-  await grantPermissions(
-    connection,
-    'finance-manager',
-    financeModules,
-    actions,
-  )
-
-  /*
-   * =========================================================
-   * ACCOUNTANT
-   * =========================================================
-   */
-
-  await grantPermissions(
-    connection,
-    'accountant',
-    [
-      'dashboard',
-      'global-search',
-      'accounts',
-      'accounting-periods',
-      'accounting',
-      'journals',
-      'recurring-journals',
-      'general-ledger',
-      'trial-balance',
-      'banking',
-      'bank-accounts',
-      'bank-statements',
-      'bank-reconciliations',
-      'cash-book',
-      'cash-transfers',
-      'fixed-assets',
-      'depreciation',
-      'budgets',
-      'budget-vs-actual',
-      'approvals',
-      'transaction-browser',
-      'reports',
-      'profit-loss',
-      'balance-sheet',
-      'cash-flow',
-      'ar-aging',
-      'ap-aging',
-      'inventory-reports',
-      'subledger-reconciliation',
-      'attachments',
-      'opening-balances',
-      'exports',
-    ],
-    standardActions,
-  )
-
-  /*
-   * =========================================================
-   * AR STAFF
-   * =========================================================
-   */
-
-  await grantPermissions(
-    connection,
-    'ar-staff',
-    [
-      'dashboard',
-      'global-search',
-      'customers',
-      'sales',
-      'sales-orders',
-      'delivery-orders',
-      'sales-invoices',
-      'sales-returns',
-      'receivables',
-      'customer-payments',
-      'ar-aging',
-      'attachments',
-      'exports',
-    ],
-    standardActions,
-  )
-
-  /*
-   * =========================================================
-   * AP STAFF
-   * =========================================================
-   */
-
-  await grantPermissions(
-    connection,
-    'ap-staff',
-    [
-      'dashboard',
-      'global-search',
-      'suppliers',
-      'purchases',
-      'purchase-orders',
-      'goods-receipts',
-      'purchase-invoices',
-      'purchase-returns',
-      'payables',
-      'supplier-payments',
-      'ap-aging',
-      'attachments',
-      'exports',
-    ],
-    standardActions,
-  )
-
-  /*
-   * =========================================================
-   * SALES
-   * =========================================================
-   */
-
-  await grantPermissions(
-    connection,
-    'sales',
-    [
-      'dashboard',
-      'global-search',
-      'customers',
-      'items',
-      'sales',
-      'sales-orders',
-      'delivery-orders',
-      'sales-invoices',
-      'receivables',
-      'attachments',
-      'exports',
-    ],
-    [
-      'view',
-      'create',
-      'update',
-      'delete',
-      'submit',
-      'confirm',
-      'cancel',
-      'print',
-      'export',
-    ],
-  )
-
-  /*
-   * =========================================================
-   * PURCHASING
-   * =========================================================
-   */
-
-  await grantPermissions(
-    connection,
-    'purchasing',
-    [
-      'dashboard',
-      'global-search',
-      'suppliers',
-      'items',
-      'purchases',
-      'purchase-orders',
-      'goods-receipts',
-      'purchase-invoices',
-      'payables',
-      'attachments',
-      'exports',
-    ],
-    [
-      'view',
-      'create',
-      'update',
-      'delete',
-      'submit',
-      'confirm',
-      'cancel',
-      'print',
-      'export',
-    ],
-  )
-
-  /*
-   * =========================================================
-   * INVENTORY
-   * =========================================================
-   */
-
-  await grantPermissions(
-    connection,
-    'inventory',
-    [
-      'dashboard',
-      'global-search',
-      'items',
-      'warehouses',
-      'units',
-      'inventory',
-      'stock-transfers',
-      'stock-adjustments',
-      'inventory-reports',
-      'delivery-orders',
-      'goods-receipts',
-      'attachments',
-      'exports',
-    ],
-    standardActions,
-  )
-
-  /*
-   * =========================================================
-   * AUDITOR
-   * =========================================================
-   */
-
-  await grantPermissions(
-    connection,
-    'auditor',
-    modules,
-    ['view', 'print', 'export'],
-  )
-
-  /*
-   * =========================================================
-   * ACCOUNTING PERIOD 2026
-   * =========================================================
-   */
-
   for (let month = 1; month <= 12; month++) {
-    const start = `2026-${String(month).padStart(2, '0')}-01`
-
-    const end = new Date(
-      Date.UTC(2026, month, 0),
-    )
+    const startDate = `2026-${String(month).padStart(2, '0')}-01`
+    const endDate = new Date(Date.UTC(2026, month, 0))
       .toISOString()
       .slice(0, 10)
 
@@ -637,15 +249,11 @@ export async function seedCore(connection: SeedConnection) {
          ?,
          'open'
        )`,
-      [month, start, end],
+      [month, startDate, endDate],
     )
   }
 
-  console.info(
-    'Seeder selesai. Login admin: admin@financeerp.local / password',
-  )
-
-  console.info(
-    'Seeder selesai. Login Vincent: vincentluhulima@gmail.com / vincent',
-  )
+  console.info('Seeder selesai.')
+  console.info('Login: vincentluhulima@gmail.com / vincent123')
+  console.info('Role: super-admin')
 }

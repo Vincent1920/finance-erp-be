@@ -15,8 +15,15 @@ export class SettingsController {
   list = async (c: Context) =>
     ok(c, await this.service.list(c.get('user').companyId, c.req.query('category')))
 
-  get = async (c: Context) =>
-    ok(c, await this.service.get(c.get('user').companyId, c.req.param('key')))
+  get = async (c: Context) => {
+    const key = c.req.param('key')
+
+    if (!key) {
+      return c.json({ success: false, message: 'Key pengaturan wajib diisi' }, 400)
+    }
+
+    return ok(c, await this.service.get(c.get('user').companyId, key))
+  }
 
   updateMany = async (c: Context) => {
     const { settings } = settingsBulkSchema.parse(await c.req.json())
@@ -41,8 +48,7 @@ export class SettingsController {
       'Profil perusahaan diperbarui',
     )
 
-  sequences = async (c: Context) =>
-    ok(c, await this.service.sequences(c.get('user').companyId))
+  sequences = async (c: Context) => ok(c, await this.service.sequences(c.get('user').companyId))
 
   updateSequence = async (c: Context) =>
     ok(
