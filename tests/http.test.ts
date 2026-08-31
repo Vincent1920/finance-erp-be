@@ -22,6 +22,8 @@ describe('HTTP smoke tests', () => {
     '/api/projects',
     '/api/bank-accounts',
     '/api/inventory/stock',
+    '/api/imports/config',
+    '/api/imports',
     '/api/users',
     '/api/roles',
     '/api/permissions',

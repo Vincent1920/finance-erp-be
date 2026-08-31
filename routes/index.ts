@@ -20,6 +20,7 @@ import {
 import auth from './auth.routes'
 import { entityRoutes } from './entity.routes'
 import inventory from './inventory.routes'
+import imports from './imports.routes'
 import journals from './journals.routes'
 import permissions from './permissions.routes'
 import reports from './reports.routes'
@@ -77,6 +78,9 @@ route.route('/journals', journals)
 
 route.use('/inventory/*', authMiddleware)
 route.route('/inventory', inventory)
+
+route.use('/imports/*', authMiddleware)
+route.route('/imports', imports)
 
 route.use('/reports/*', authMiddleware)
 route.route('/reports', reports)
