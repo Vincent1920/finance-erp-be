@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+coverage
+logs
+.tmp
+*.log
+*.tsbuildinfo
+Dockerfile*
+README.md
+DEVELOPMENT.md
+postman
+tests
