@@ -1,5 +1,6 @@
 import { transaction } from '../config/database'
 import { JournalRepository } from '../repositories/JournalRepository'
+import type { QueryExecutor } from '../types/database'
 import { ConflictError, NotFoundError } from '../utils/AppError'
 import type { z } from 'zod'
 
@@ -47,37 +48,44 @@ export class JournalService {
   }
 
   async create(companyId: number, input: JournalInput, context: PostingContext) {
-    return transaction(async (connection) => {
-      await this.validation.ensureOpenPeriod(connection, companyId, input.journal_date)
-      const totals = await this.posting.validateLines(connection, companyId, input.lines)
-      const number = await this.sequences.next(connection, companyId, 'journal', input.journal_date)
-      const id = await this.repository.create(connection, {
-        companyId,
-        number,
-        date: input.journal_date,
-        reference: input.reference,
-        description: input.description,
-        currency: input.currency,
-        exchangeRate: input.exchange_rate,
-        status: 'draft',
-        userId: context.userId,
-        totalDebit: totals.totalDebit,
-        totalCredit: totals.totalCredit,
-        lines: this.posting.toJournalLines(input.lines, input.exchange_rate),
-      })
-      await this.audit.log(connection, {
-        companyId,
-        userId: context.userId,
-        module: 'accounting',
-        action: 'create',
-        recordType: 'journal',
-        recordId: id,
-        newValue: { journalNumber: number, status: 'draft', total: totals.totalDebit },
-        requestId: context.requestId,
-        ip: context.ip,
-      })
-      return { id, journalNumber: number, status: 'draft' }
+    return transaction((connection) => this.createInTransaction(connection, companyId, input, context))
+  }
+
+  async createInTransaction(
+    connection: QueryExecutor,
+    companyId: number,
+    input: JournalInput,
+    context: PostingContext,
+  ) {
+    await this.validation.ensureOpenPeriod(connection, companyId, input.journal_date)
+    const totals = await this.posting.validateLines(connection, companyId, input.lines)
+    const number = await this.sequences.next(connection, companyId, 'journal', input.journal_date)
+    const id = await this.repository.create(connection, {
+      companyId,
+      number,
+      date: input.journal_date,
+      reference: input.reference,
+      description: input.description,
+      currency: input.currency,
+      exchangeRate: input.exchange_rate,
+      status: 'draft',
+      userId: context.userId,
+      totalDebit: totals.totalDebit,
+      totalCredit: totals.totalCredit,
+      lines: this.posting.toJournalLines(input.lines, input.exchange_rate),
     })
+    await this.audit.log(connection, {
+      companyId,
+      userId: context.userId,
+      module: 'accounting',
+      action: 'create',
+      recordType: 'journal',
+      recordId: id,
+      newValue: { journalNumber: number, status: 'draft', total: totals.totalDebit },
+      requestId: context.requestId,
+      ip: context.ip,
+    })
+    return { id, journalNumber: number, status: 'draft' as const }
   }
 
   async update(id: number, companyId: number, input: JournalInput, context: PostingContext) {
@@ -149,6 +157,20 @@ export class JournalService {
     })
   }
 
+  async submitInTransaction(
+    connection: QueryExecutor,
+    id: number,
+    companyId: number,
+    context: PostingContext,
+  ) {
+    return this.transitionInTransaction(connection, id, companyId, context, {
+      allowed: ['draft', 'rejected'],
+      status: 'pending_approval',
+      action: 'submit',
+      fields: { submitted_by: context.userId, submitted_at: this.timestamp() },
+    })
+  }
+
   async approve(id: number, companyId: number, context: PostingContext) {
     return this.transition(id, companyId, context, {
       allowed: ['pending_approval'],
@@ -207,33 +229,51 @@ export class JournalService {
       fields: Record<string, string | number | null>
     },
   ) {
-    await transaction(async (connection) => {
-      const journal = await this.repository.findForUpdate(connection, id, companyId)
-      if (!journal) throw new NotFoundError('Jurnal tidak ditemukan')
-      this.ensureManual(journal.source_type)
-      if (!change.allowed.includes(journal.status)) {
-        throw new ConflictError(`Jurnal berstatus ${journal.status} tidak dapat ${change.action}`)
-      }
-      await this.validation.ensureOpenPeriod(connection, companyId, this.dateOnly(journal.journal_date))
-      const lines = await this.repository.lines(connection, id)
-      assertBalanced(lines.map((line) => ({
+    await transaction((connection) =>
+      this.transitionInTransaction(connection, id, companyId, context, change),
+    )
+    return { id, status: change.status }
+  }
+
+  private async transitionInTransaction(
+    connection: QueryExecutor,
+    id: number,
+    companyId: number,
+    context: PostingContext,
+    change: {
+      allowed: string[]
+      status: string
+      action: string
+      fields: Record<string, string | number | null>
+    },
+  ) {
+    const journal = await this.repository.findForUpdate(connection, id, companyId)
+    if (!journal) throw new NotFoundError('Jurnal tidak ditemukan')
+    this.ensureManual(journal.source_type)
+    if (!change.allowed.includes(journal.status)) {
+      throw new ConflictError(`Jurnal berstatus ${journal.status} tidak dapat ${change.action}`)
+    }
+    await this.validation.ensureOpenPeriod(connection, companyId, this.dateOnly(journal.journal_date))
+    const lines = await this.repository.lines(connection, id)
+    assertBalanced(
+      lines.map((line) => ({
         accountId: Number(line.account_id),
         debit: line.debit,
         credit: line.credit,
-      })))
-      await this.repository.transition(connection, id, change.status, change.fields)
-      await this.audit.log(connection, {
-        companyId,
-        userId: context.userId,
-        module: 'accounting',
-        action: change.action,
-        recordType: 'journal',
-        recordId: id,
-        oldValue: { status: journal.status },
-        newValue: { status: change.status },
-        requestId: context.requestId,
-        ip: context.ip,
-      })
+      })),
+    )
+    await this.repository.transition(connection, id, change.status, change.fields)
+    await this.audit.log(connection, {
+      companyId,
+      userId: context.userId,
+      module: 'accounting',
+      action: change.action,
+      recordType: 'journal',
+      recordId: id,
+      oldValue: { status: journal.status },
+      newValue: { status: change.status },
+      requestId: context.requestId,
+      ip: context.ip,
     })
     return { id, status: change.status }
   }

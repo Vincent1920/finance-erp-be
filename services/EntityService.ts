@@ -113,24 +113,31 @@ export class EntityService {
   }
 
   async create(companyId: number, data: Record<string, unknown>, context: MutationContext) {
-    return transaction(async (connection) => {
-      const normalized = normalizeData(this.table, data, context)
-      await this.validateReferences(connection, companyId, normalized)
-      await this.validatePeriod(connection, companyId, normalized)
-      const row = await this.repo.create(companyId, normalized, connection)
-      await this.audit.log(connection, {
-        companyId,
-        userId: context.userId,
-        module: this.table,
-        action: 'create',
-        recordType: this.table,
-        recordId: Number(row?.id),
-        newValue: row,
-        requestId: context.requestId,
-        ip: context.ip,
-      })
-      return row
+    return transaction((connection) => this.createInTransaction(connection, companyId, data, context))
+  }
+
+  async createInTransaction(
+    connection: QueryExecutor,
+    companyId: number,
+    data: Record<string, unknown>,
+    context: MutationContext,
+  ) {
+    const normalized = normalizeData(this.table, data, context)
+    await this.validateReferences(connection, companyId, normalized)
+    await this.validatePeriod(connection, companyId, normalized)
+    const row = await this.repo.create(companyId, normalized, connection)
+    await this.audit.log(connection, {
+      companyId,
+      userId: context.userId,
+      module: this.table,
+      action: 'create',
+      recordType: this.table,
+      recordId: Number(row?.id),
+      newValue: row,
+      requestId: context.requestId,
+      ip: context.ip,
     })
+    return row
   }
 
   async update(
