@@ -25,6 +25,7 @@ import journals from './journals.routes'
 import permissions from './permissions.routes'
 import reports from './reports.routes'
 import roles from './roles.routes'
+import sales from './sales.routes'
 import settings from './settings.routes'
 import users from './users.routes'
 
@@ -81,6 +82,9 @@ route.route('/inventory', inventory)
 
 route.use('/imports/*', authMiddleware)
 route.route('/imports', imports)
+
+route.use('/sales/*', authMiddleware)
+route.route('/sales', sales)
 
 route.use('/reports/*', authMiddleware)
 route.route('/reports', reports)
