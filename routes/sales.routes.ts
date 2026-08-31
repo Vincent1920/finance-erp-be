@@ -3,12 +3,24 @@ import { Hono } from 'hono'
 import { SalesOrderController } from '../controllers/SalesOrderController'
 import { SalesInvoiceController } from '../controllers/SalesInvoiceController'
 import { ReceivableController } from '../controllers/ReceivableController'
+import { SalesReturnController } from '../controllers/SalesReturnController'
 import { requirePermission } from '../middleware/permission.middleware'
 
 const route = new Hono()
 const orders = new SalesOrderController()
 const invoices = new SalesInvoiceController()
 const receivables = new ReceivableController()
+const returns = new SalesReturnController()
+
+route.get('/returns', requirePermission('sales-returns.view'), returns.list)
+route.post('/returns', requirePermission('sales-returns.create'), returns.create)
+route.post('/returns/:id/submit', requirePermission('sales-returns.submit'), returns.submit)
+route.post('/returns/:id/approve', requirePermission('sales-returns.approve'), returns.approve)
+route.post('/returns/:id/reject', requirePermission('sales-returns.reject'), returns.reject)
+route.post('/returns/:id/post', requirePermission('sales-returns.post'), returns.post)
+route.post('/returns/:id/reverse', requirePermission('sales-returns.reverse'), returns.reverse)
+route.post('/returns/:id/cancel', requirePermission('sales-returns.cancel'), returns.cancel)
+route.get('/returns/:id', requirePermission('sales-returns.view'), returns.get)
 
 route.get('/receivables/aging', requirePermission('receivables.view'), receivables.aging)
 
