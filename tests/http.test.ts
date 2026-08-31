@@ -23,6 +23,7 @@ describe('HTTP smoke tests', () => {
     '/api/bank-accounts',
     '/api/sales/orders',
     '/api/sales/invoices',
+    '/api/sales/receivables/aging?as_of_date=2026-09-01',
     '/api/inventory/stock',
     '/api/imports/config',
     '/api/imports',

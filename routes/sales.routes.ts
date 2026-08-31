@@ -2,11 +2,15 @@ import { Hono } from 'hono'
 
 import { SalesOrderController } from '../controllers/SalesOrderController'
 import { SalesInvoiceController } from '../controllers/SalesInvoiceController'
+import { ReceivableController } from '../controllers/ReceivableController'
 import { requirePermission } from '../middleware/permission.middleware'
 
 const route = new Hono()
 const orders = new SalesOrderController()
 const invoices = new SalesInvoiceController()
+const receivables = new ReceivableController()
+
+route.get('/receivables/aging', requirePermission('receivables.view'), receivables.aging)
 
 route.get('/invoices', requirePermission('sales-invoices.view'), invoices.list)
 route.post('/invoices', requirePermission('sales-invoices.create'), invoices.create)
