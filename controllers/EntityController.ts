@@ -3,6 +3,16 @@ import type { ZodObject, ZodRawShape } from 'zod'
 import { EntityService } from '../services/EntityService'
 import type { EntityTable } from '../repositories/EntityRepository'
 import { created, ok, paginated } from '../utils/response'
+
+const requestContext = (c: Context) => ({
+  userId: c.get('user').id,
+  requestId: c.get('requestId'),
+  ip:
+    c.req.header('cf-connecting-ip') ??
+    c.req.header('x-real-ip') ??
+    c.req.header('x-forwarded-for')?.split(',')[0]?.trim(),
+})
+
 export class EntityController {
   private service: EntityService
   constructor(
@@ -24,6 +34,7 @@ export class EntityController {
       await this.service.create(
         c.get('user').companyId,
         this.schema.parse(await c.req.json()) as Record<string, unknown>,
+        requestContext(c),
       ),
     )
   update = async (c: Context) =>
@@ -33,11 +44,16 @@ export class EntityController {
         Number(c.req.param('id')),
         c.get('user').companyId,
         this.schema.partial().parse(await c.req.json()) as Record<string, unknown>,
+        requestContext(c),
       ),
       'Data berhasil diperbarui',
     )
   remove = async (c: Context) => {
-    await this.service.remove(Number(c.req.param('id')), c.get('user').companyId)
-    return ok(c, null, 'Data berhasil dihapus')
+    const result = await this.service.remove(
+      Number(c.req.param('id')),
+      c.get('user').companyId,
+      requestContext(c),
+    )
+    return ok(c, null, result === 'deactivated' ? 'Data berhasil dinonaktifkan' : 'Data berhasil dihapus')
   }
 }
