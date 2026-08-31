@@ -5,6 +5,7 @@ import { migration as foundationLifecycle } from './004_foundation_lifecycle'
 import { migration as salesPurchaseInventory } from './005_sales_purchase_inventory'
 import { migration as financeWorkflowReporting } from './006_finance_workflow_reporting'
 import { migration as systemOpeningControls } from './007_system_opening_and_controls'
+import { migration as dataImportWorkflow } from './008_data_import_workflow'
 
 export const migrations = [
   core,
@@ -14,4 +15,5 @@ export const migrations = [
   salesPurchaseInventory,
   financeWorkflowReporting,
   systemOpeningControls,
+  dataImportWorkflow,
 ]
