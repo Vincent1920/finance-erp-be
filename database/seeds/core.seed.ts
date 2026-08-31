@@ -126,7 +126,13 @@ const financeModules = modules.filter(
 
 const standardActions = actions.filter(
   (action) =>
-    !['close_period', 'reopen_period', 'lock', 'reset_password', 'restore'].includes(action),
+    ![
+      'close_period',
+      'reopen_period',
+      'lock',
+      'reset_password',
+      'restore',
+    ].includes(action),
 )
 
 async function grantPermissions(
@@ -141,7 +147,9 @@ async function grantPermissions(
         `INSERT IGNORE INTO role_permissions (role_id, permission_id)
          SELECT r.id, p.id
            FROM roles r
-           JOIN permissions p ON p.module = ? AND p.action = ?
+           JOIN permissions p
+             ON p.module = ?
+            AND p.action = ?
           WHERE r.slug = ?`,
         [module, action, roleSlug],
       )
@@ -150,63 +158,249 @@ async function grantPermissions(
 }
 
 export async function seedCore(connection: SeedConnection) {
+  /*
+   * =========================================================
+   * COMPANY
+   * =========================================================
+   */
+
   await connection.execute(
-    `INSERT INTO companies (id, name, legal_name, base_currency, fiscal_year_start)
-     VALUES (1, 'PT Finora Indonesia', 'PT Finora Indonesia', 'IDR', 1)
-     ON DUPLICATE KEY UPDATE id = id`,
+    `INSERT INTO companies (
+       id,
+       name,
+       legal_name,
+       base_currency,
+       fiscal_year_start
+     )
+     VALUES (
+       1,
+       'PT Finora Indonesia',
+       'PT Finora Indonesia',
+       'IDR',
+       1
+     )
+     ON DUPLICATE KEY UPDATE
+       id = id`,
   )
+
+  /*
+   * =========================================================
+   * ROLES
+   * =========================================================
+   */
 
   for (const [name, slug] of roles) {
     await connection.execute(
-      `INSERT INTO roles (name, slug, is_system)
+      `INSERT INTO roles (
+         name,
+         slug,
+         is_system
+       )
        VALUES (?, ?, TRUE)
-       ON DUPLICATE KEY UPDATE is_system = TRUE`,
+       ON DUPLICATE KEY UPDATE
+         is_system = TRUE`,
       [name, slug],
     )
   }
 
+  /*
+   * =========================================================
+   * PERMISSIONS
+   * =========================================================
+   */
+
   for (const module of modules) {
     for (const action of actions) {
       await connection.execute(
-        'INSERT IGNORE INTO permissions (module, action, name, slug) VALUES (?, ?, ?, ?)',
-        [module, action, `${action} ${module}`, `${module}.${action}`],
+        `INSERT IGNORE INTO permissions (
+           module,
+           action,
+           name,
+           slug
+         )
+         VALUES (?, ?, ?, ?)`,
+        [
+          module,
+          action,
+          `${action} ${module}`,
+          `${module}.${action}`,
+        ],
       )
     }
   }
 
+  /*
+   * =========================================================
+   * PASSWORD HASH
+   * =========================================================
+   */
+
   const initialPasswordHash = await hashPassword('password')
+  const vincentPasswordHash = await hashPassword('vincent')
+
+  /*
+   * =========================================================
+   * DEFAULT SUPER ADMIN
+   * =========================================================
+   *
+   * Email:
+   * admin@financeerp.local
+   *
+   * Password:
+   * password
+   */
 
   await connection.execute(
-    `INSERT INTO users (company_id, name, email, password, status, password_changed_at)
-     VALUES (1, 'Super Admin', 'admin@financeerp.local', ?, 'active', CURRENT_TIMESTAMP)
+    `INSERT INTO users (
+       company_id,
+       name,
+       email,
+       password,
+       status,
+       password_changed_at
+     )
+     VALUES (
+       1,
+       'Super Admin',
+       'admin@financeerp.local',
+       ?,
+       'active',
+       CURRENT_TIMESTAMP
+     )
      ON DUPLICATE KEY UPDATE
-       name = VALUES(name), company_id = VALUES(company_id)`,
+       name = VALUES(name),
+       company_id = VALUES(company_id),
+       status = 'active'`,
     [initialPasswordHash],
   )
 
-  const [adminRows] = await connection.execute<(RowDataPacket & { id: number })[]>(
-    'SELECT id FROM users WHERE email = ? LIMIT 1',
+  const [adminRows] = await connection.execute<
+    (RowDataPacket & { id: number })[]
+  >(
+    `SELECT id
+       FROM users
+      WHERE email = ?
+      LIMIT 1`,
     ['admin@financeerp.local'],
   )
+
   const adminId = adminRows[0]?.id
+
   if (!adminId) {
     throw new Error('Seeder gagal menemukan akun Super Admin')
   }
 
   await connection.execute(
-    `INSERT IGNORE INTO user_roles (user_id, role_id)
-     SELECT ?, id FROM roles WHERE slug = 'super-admin'`,
+    `INSERT IGNORE INTO user_roles (
+       user_id,
+       role_id
+     )
+     SELECT ?, id
+       FROM roles
+      WHERE slug = 'super-admin'`,
     [adminId],
   )
+
+  /*
+   * =========================================================
+   * VINCENT DEVELOPMENT SUPER ADMIN
+   * =========================================================
+   *
+   * Email:
+   * vincentluhulima@gmail.com
+   *
+   * Password:
+   * vincent
+   */
+
   await connection.execute(
-    `INSERT IGNORE INTO role_permissions (role_id, permission_id)
-     SELECT r.id, p.id
-     FROM roles r
-     CROSS JOIN permissions p
-     WHERE r.slug = 'super-admin'`,
+    `INSERT INTO users (
+       company_id,
+       name,
+       email,
+       password,
+       status,
+       password_changed_at
+     )
+     VALUES (
+       1,
+       'Vincent Luhulima',
+       'vincentluhulima@gmail.com',
+       ?,
+       'active',
+       CURRENT_TIMESTAMP
+     )
+     ON DUPLICATE KEY UPDATE
+       name = VALUES(name),
+       company_id = VALUES(company_id),
+       password = VALUES(password),
+       status = 'active'`,
+    [vincentPasswordHash],
   )
 
-  await grantPermissions(connection, 'finance-manager', financeModules, actions)
+  const [vincentRows] = await connection.execute<
+    (RowDataPacket & { id: number })[]
+  >(
+    `SELECT id
+       FROM users
+      WHERE email = ?
+      LIMIT 1`,
+    ['vincentluhulima@gmail.com'],
+  )
+
+  const vincentId = vincentRows[0]?.id
+
+  if (!vincentId) {
+    throw new Error('Seeder gagal menemukan akun Vincent')
+  }
+
+  await connection.execute(
+    `INSERT IGNORE INTO user_roles (
+       user_id,
+       role_id
+     )
+     SELECT ?, id
+       FROM roles
+      WHERE slug = 'super-admin'`,
+    [vincentId],
+  )
+
+  /*
+   * =========================================================
+   * SUPER ADMIN PERMISSIONS
+   * =========================================================
+   */
+
+  await connection.execute(
+    `INSERT IGNORE INTO role_permissions (
+       role_id,
+       permission_id
+     )
+     SELECT r.id, p.id
+       FROM roles r
+       CROSS JOIN permissions p
+      WHERE r.slug = 'super-admin'`,
+  )
+
+  /*
+   * =========================================================
+   * FINANCE MANAGER
+   * =========================================================
+   */
+
+  await grantPermissions(
+    connection,
+    'finance-manager',
+    financeModules,
+    actions,
+  )
+
+  /*
+   * =========================================================
+   * ACCOUNTANT
+   * =========================================================
+   */
+
   await grantPermissions(
     connection,
     'accountant',
@@ -246,6 +440,13 @@ export async function seedCore(connection: SeedConnection) {
     ],
     standardActions,
   )
+
+  /*
+   * =========================================================
+   * AR STAFF
+   * =========================================================
+   */
+
   await grantPermissions(
     connection,
     'ar-staff',
@@ -266,6 +467,13 @@ export async function seedCore(connection: SeedConnection) {
     ],
     standardActions,
   )
+
+  /*
+   * =========================================================
+   * AP STAFF
+   * =========================================================
+   */
+
   await grantPermissions(
     connection,
     'ap-staff',
@@ -286,6 +494,13 @@ export async function seedCore(connection: SeedConnection) {
     ],
     standardActions,
   )
+
+  /*
+   * =========================================================
+   * SALES
+   * =========================================================
+   */
+
   await grantPermissions(
     connection,
     'sales',
@@ -302,8 +517,25 @@ export async function seedCore(connection: SeedConnection) {
       'attachments',
       'exports',
     ],
-    ['view', 'create', 'update', 'delete', 'submit', 'confirm', 'cancel', 'print', 'export'],
+    [
+      'view',
+      'create',
+      'update',
+      'delete',
+      'submit',
+      'confirm',
+      'cancel',
+      'print',
+      'export',
+    ],
   )
+
+  /*
+   * =========================================================
+   * PURCHASING
+   * =========================================================
+   */
+
   await grantPermissions(
     connection,
     'purchasing',
@@ -320,8 +552,25 @@ export async function seedCore(connection: SeedConnection) {
       'attachments',
       'exports',
     ],
-    ['view', 'create', 'update', 'delete', 'submit', 'confirm', 'cancel', 'print', 'export'],
+    [
+      'view',
+      'create',
+      'update',
+      'delete',
+      'submit',
+      'confirm',
+      'cancel',
+      'print',
+      'export',
+    ],
   )
+
+  /*
+   * =========================================================
+   * INVENTORY
+   * =========================================================
+   */
+
   await grantPermissions(
     connection,
     'inventory',
@@ -342,17 +591,61 @@ export async function seedCore(connection: SeedConnection) {
     ],
     standardActions,
   )
-  await grantPermissions(connection, 'auditor', modules, ['view', 'print', 'export'])
+
+  /*
+   * =========================================================
+   * AUDITOR
+   * =========================================================
+   */
+
+  await grantPermissions(
+    connection,
+    'auditor',
+    modules,
+    ['view', 'print', 'export'],
+  )
+
+  /*
+   * =========================================================
+   * ACCOUNTING PERIOD 2026
+   * =========================================================
+   */
 
   for (let month = 1; month <= 12; month++) {
     const start = `2026-${String(month).padStart(2, '0')}-01`
-    const end = new Date(Date.UTC(2026, month, 0)).toISOString().slice(0, 10)
+
+    const end = new Date(
+      Date.UTC(2026, month, 0),
+    )
+      .toISOString()
+      .slice(0, 10)
 
     await connection.execute(
       `INSERT IGNORE INTO accounting_periods (
-         company_id, year, month, start_date, end_date, status
-       ) VALUES (1, 2026, ?, ?, ?, 'open')`,
+         company_id,
+         year,
+         month,
+         start_date,
+         end_date,
+         status
+       )
+       VALUES (
+         1,
+         2026,
+         ?,
+         ?,
+         ?,
+         'open'
+       )`,
       [month, start, end],
     )
   }
+
+  console.info(
+    'Seeder selesai. Login admin: admin@financeerp.local / password',
+  )
+
+  console.info(
+    'Seeder selesai. Login Vincent: vincentluhulima@gmail.com / vincent',
+  )
 }
