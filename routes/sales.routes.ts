@@ -1,10 +1,23 @@
 import { Hono } from 'hono'
 
 import { SalesOrderController } from '../controllers/SalesOrderController'
+import { SalesInvoiceController } from '../controllers/SalesInvoiceController'
 import { requirePermission } from '../middleware/permission.middleware'
 
 const route = new Hono()
 const orders = new SalesOrderController()
+const invoices = new SalesInvoiceController()
+
+route.get('/invoices', requirePermission('sales-invoices.view'), invoices.list)
+route.post('/invoices', requirePermission('sales-invoices.create'), invoices.create)
+route.post('/invoices/:id/submit', requirePermission('sales-invoices.submit'), invoices.submit)
+route.post('/invoices/:id/approve', requirePermission('sales-invoices.approve'), invoices.approve)
+route.post('/invoices/:id/reject', requirePermission('sales-invoices.reject'), invoices.reject)
+route.post('/invoices/:id/post', requirePermission('sales-invoices.post'), invoices.post)
+route.post('/invoices/:id/reverse', requirePermission('sales-invoices.reverse'), invoices.reverse)
+route.post('/invoices/:id/cancel', requirePermission('sales-invoices.cancel'), invoices.cancel)
+route.get('/invoices/:id', requirePermission('sales-invoices.view'), invoices.get)
+route.put('/invoices/:id', requirePermission('sales-invoices.update'), invoices.update)
 
 route.get('/orders', requirePermission('sales-orders.view'), orders.list)
 route.post('/orders', requirePermission('sales-orders.create'), orders.create)

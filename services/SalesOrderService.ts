@@ -210,7 +210,7 @@ export class SalesOrderService {
             taxCodeId: line.tax_code_id ? Number(line.tax_code_id) : null,
           })),
         },
-        context,
+        { ...context, source: 'sales_order' },
       )
       const status = await this.repository.linkInvoice(
         connection,

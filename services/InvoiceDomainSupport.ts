@@ -97,6 +97,7 @@ export interface InvoiceMutationContext {
   userId: number
   requestId?: string | null
   ip?: string | null
+  source?: 'data_import' | 'sales_order' | 'manual'
 }
 
 export interface CreatedImportedInvoice {
