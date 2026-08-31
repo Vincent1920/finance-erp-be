@@ -1,11 +1,14 @@
 import { describe, expect, test } from 'bun:test'
 
 import { IMPORT_TYPES } from '../services/import/ImportDefinitions'
+import { ImportValidationService } from '../services/import/ImportValidationService'
 import {
   createErrorReport,
   createImportTemplate,
   parseImportFile,
 } from '../services/import/TabularFileService'
+import { importRowsQuerySchema } from '../validators/import.validator'
+import type { QueryExecutor } from '../types/database'
 
 const file = (name: string, content: Uint8Array | Buffer, type = '') => ({
   name,
@@ -16,6 +19,14 @@ const file = (name: string, content: Uint8Array | Buffer, type = '') => ({
 })
 
 describe('data import parser and templates', () => {
+  test('accepts the duplicate preview filter exposed by the frontend', () => {
+    expect(importRowsQuerySchema.parse({ status: 'duplicate' })).toEqual({
+      page: 1,
+      limit: 50,
+      status: 'duplicate',
+    })
+  })
+
   test('parses UTF-8 CSV with BOM, quoted delimiters, and source row numbers', async () => {
     const content = Buffer.from(
       '\uFEFFcustomer_code,customer_name,email\r\nC-001,"PT Contoh, Tbk",finance@example.com\r\n',
@@ -67,5 +78,75 @@ describe('data import parser and templates', () => {
     const text = report.content.toString('utf8')
     expect(text).toContain("'=HYPERLINK")
     expect(text).toContain("'+unsafe")
+  })
+
+  test('rejects invalid and cyclic in-file account hierarchies during preview', async () => {
+    const emptyCatalog = {
+      execute: async () => [[]],
+    } as unknown as QueryExecutor
+    const validation = new ImportValidationService()
+
+    const invalidParent = await validation.validate(
+      1,
+      'chart_of_accounts',
+      [
+        {
+          rowNumber: 2,
+          data: {
+            account_code: '110100',
+            account_name: 'Kas',
+            account_type: 'asset',
+            normal_balance: 'debit',
+            parent_code: '110000',
+          },
+        },
+        {
+          rowNumber: 3,
+          data: {
+            account_code: '110000',
+            account_name: 'Aset Lancar',
+            account_type: 'invalid',
+            normal_balance: 'debit',
+          },
+        },
+      ],
+      emptyCatalog,
+    )
+    expect(
+      invalidParent.rows[0]?.issues.some((issue) => issue.code === 'invalid_parent_account'),
+    ).toBe(true)
+
+    const cyclic = await validation.validate(
+      1,
+      'chart_of_accounts',
+      [
+        {
+          rowNumber: 2,
+          data: {
+            account_code: 'A',
+            account_name: 'Akun A',
+            account_type: 'asset',
+            normal_balance: 'debit',
+            parent_code: 'B',
+          },
+        },
+        {
+          rowNumber: 3,
+          data: {
+            account_code: 'B',
+            account_name: 'Akun B',
+            account_type: 'asset',
+            normal_balance: 'debit',
+            parent_code: 'A',
+          },
+        },
+      ],
+      emptyCatalog,
+    )
+    expect(
+      cyclic.rows.every((row) =>
+        row.issues.some((issue) => issue.code === 'account_hierarchy_cycle'),
+      ),
+    ).toBe(true)
   })
 })

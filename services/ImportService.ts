@@ -118,7 +118,7 @@ export class ImportService {
   async rows(
     actor: ImportActor,
     id: number,
-    query: { page: number; limit: number; status?: 'valid' | 'warning' | 'error' },
+    query: { page: number; limit: number; status?: 'valid' | 'warning' | 'error' | 'duplicate' },
   ) {
     await this.ownedJob(actor, id)
     return this.repository.rows(id, query)
@@ -169,23 +169,7 @@ export class ImportService {
       throw new ValidationError('Jenis import ini tidak mendukung status Submitted')
     }
 
-    const staged = await this.repository.allRows(id)
-    if (!staged.length) throw new ConflictError('Payload preview sudah tidak tersedia atau kedaluwarsa')
-    const refreshed = await this.validation.validate(
-      actor.companyId,
-      existing.entity_type,
-      staged.map((row) => ({ rowNumber: row.rowNumber, data: row.data })),
-    )
-    await transaction((connection) =>
-      this.repository.savePreview(connection, id, refreshed.rows, {
-        ...refreshed.summary,
-        warnings: [],
-      }),
-    )
-    if (options.error_policy === 'all_or_nothing' && refreshed.summary.errorRows > 0) {
-      throw new ConflictError('Import dibatalkan karena masih terdapat error kritis')
-    }
-
+    let blockingError: string | null = null
     try {
       await transaction(async (connection) => {
         const locked = await this.repository.find(id, actor.companyId, actor.id, connection, true)
@@ -198,14 +182,22 @@ export class ImportService {
         }
 
         const currentRows = await this.repository.allRows(id, connection)
+        if (!currentRows.length) {
+          throw new ConflictError('Payload preview sudah tidak tersedia atau kedaluwarsa')
+        }
         const revalidated = await this.validation.validate(
           actor.companyId,
           locked.entity_type,
           currentRows.map((row) => ({ rowNumber: row.rowNumber, data: row.data })),
           connection,
         )
+        await this.repository.savePreview(connection, id, revalidated.rows, {
+          ...revalidated.summary,
+          warnings: [],
+        })
         if (options.error_policy === 'all_or_nothing' && revalidated.summary.errorRows > 0) {
-          throw new ConflictError('Data berubah setelah preview dan sekarang memiliki error kritis')
+          blockingError = 'Data berubah setelah preview dan sekarang memiliki error kritis'
+          return
         }
         const eligible = revalidated.rows.filter(
           (row) =>
@@ -269,11 +261,12 @@ export class ImportService {
         }
       })
     } catch (error) {
-      if (!(error instanceof ConflictError && error.message.includes('error kritis'))) {
+      if (this.shouldMarkFailed(error)) {
         await this.repository.markFailed(id, this.safeError(error))
       }
       throw error
     }
+    if (blockingError) throw new ConflictError(blockingError)
 
     const completed = await this.repository.find(id, actor.companyId, actor.id)
     if (!completed) throw new NotFoundError('Import job tidak ditemukan')
@@ -754,5 +747,9 @@ export class ImportService {
   private safeError(error: unknown) {
     if (error instanceof AppError) return error.message
     return 'Import gagal diproses dan seluruh perubahan telah di-rollback'
+  }
+
+  private shouldMarkFailed(error: unknown) {
+    return !(error instanceof ConflictError)
   }
 }

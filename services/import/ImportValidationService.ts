@@ -346,6 +346,7 @@ export class ImportValidationService {
     this.validateReferences(type, rows, catalog)
     this.validateWithinFile(type, rows)
     await this.validateDatabaseDuplicates(connection, companyId, type, rows)
+    if (type === 'chart_of_accounts') this.validateAccountHierarchy(rows, catalog)
     if (type === 'inventory') await this.validateExistingInventory(connection, companyId, rows, catalog)
     this.propagateDocumentErrors(type, rows)
 
@@ -552,6 +553,54 @@ export class ImportValidationService {
             issue(row, 'balance', 'error', 'running_balance_mismatch', 'Saldo berjalan tidak konsisten dengan debit dan kredit')
           }
         }
+      }
+    }
+  }
+
+  private validateAccountHierarchy(rows: PreviewRowWrite[], catalog: ReferenceCatalog) {
+    const byCode = new Map(rows.map((row) => [normalizedCode(row.data.account_code), row]))
+
+    for (const row of rows) {
+      const ownCode = normalizedCode(row.data.account_code)
+      let parentCode = normalizedCode(row.data.parent_code)
+      const visited = new Set(ownCode ? [ownCode] : [])
+
+      while (parentCode && !catalog.accounts.has(parentCode)) {
+        if (visited.has(parentCode)) {
+          issue(
+            row,
+            'parent_code',
+            'error',
+            'account_hierarchy_cycle',
+            'Hierarki akun mengandung siklus',
+          )
+          break
+        }
+        visited.add(parentCode)
+
+        const parent = byCode.get(parentCode)
+        if (!parent) break
+        if (parent.issues.some((item) => item.code === 'account_hierarchy_cycle')) {
+          issue(
+            row,
+            'parent_code',
+            'error',
+            'account_hierarchy_cycle',
+            'Hierarki akun mengandung siklus',
+          )
+          break
+        }
+        if (parent.issues.some((item) => item.severity === 'error')) {
+          issue(
+            row,
+            'parent_code',
+            'error',
+            'invalid_parent_account',
+            'Akun induk di dalam file tidak valid dan tidak dapat dibuat',
+          )
+          break
+        }
+        parentCode = normalizedCode(parent.data.parent_code)
       }
     }
   }

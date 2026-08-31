@@ -308,12 +308,14 @@ export class ImportRepository {
 
   async rows(
     jobId: number,
-    query: { page: number; limit: number; status?: PreviewRowStatus },
+    query: { page: number; limit: number; status?: PreviewRowStatus | 'duplicate' },
     connection: QueryExecutor = db,
   ) {
     const conditions = ['import_job_id = ?']
     const values: DatabaseValue[] = [jobId]
-    if (query.status) {
+    if (query.status === 'duplicate') {
+      conditions.push('is_duplicate = TRUE')
+    } else if (query.status) {
       conditions.push('row_status = ?')
       values.push(query.status)
     }

@@ -265,7 +265,7 @@ export const importConfirmSchema = z.object({
 export const importRowsQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
-  status: z.enum(['valid', 'warning', 'error']).optional(),
+  status: z.enum(['valid', 'warning', 'error', 'duplicate']).optional(),
 })
 export const importHistoryQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
