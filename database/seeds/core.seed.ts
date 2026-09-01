@@ -153,7 +153,7 @@ export async function seedCore(connection: SeedConnection) {
     }
   }
 
-  const vincentPasswordHash = await hashPassword('vincent123')
+  const demoPasswordHash = await hashPassword('DemoFinance2026!')
 
   await connection.execute(
     `INSERT INTO users (
@@ -166,8 +166,8 @@ export async function seedCore(connection: SeedConnection) {
      )
      VALUES (
        1,
-       'Vincent Luhulima',
-       'vincentluhulima@gmail.com',
+       'Finora Demo Administrator',
+       'demo.admin@finora.local',
        ?,
        'active',
        CURRENT_TIMESTAMP
@@ -178,29 +178,29 @@ export async function seedCore(connection: SeedConnection) {
        password = VALUES(password),
        status = VALUES(status),
        password_changed_at = CURRENT_TIMESTAMP`,
-    [vincentPasswordHash],
+    [demoPasswordHash],
   )
 
-  const [vincentRows] = await connection.execute<
+  const [demoRows] = await connection.execute<
     (RowDataPacket & { id: number })[]
   >(
     `SELECT id
        FROM users
       WHERE email = ?
       LIMIT 1`,
-    ['vincentluhulima@gmail.com'],
+    ['demo.admin@finora.local'],
   )
 
-  const vincentId = vincentRows[0]?.id
+  const demoUserId = demoRows[0]?.id
 
-  if (!vincentId) {
-    throw new Error('Seeder gagal menemukan akun Vincent')
+  if (!demoUserId) {
+    throw new Error('Seeder gagal menemukan akun demo')
   }
 
   await connection.execute(
     `DELETE FROM user_roles
       WHERE user_id = ?`,
-    [vincentId],
+    [demoUserId],
   )
 
   await connection.execute(
@@ -212,7 +212,7 @@ export async function seedCore(connection: SeedConnection) {
        FROM roles
       WHERE slug = 'super-admin'
       LIMIT 1`,
-    [vincentId],
+    [demoUserId],
   )
 
   await connection.execute(
@@ -253,7 +253,4 @@ export async function seedCore(connection: SeedConnection) {
     )
   }
 
-  console.info('Seeder selesai.')
-  console.info('Login: vincentluhulima@gmail.com / vincent123')
-  console.info('Role: super-admin')
 }

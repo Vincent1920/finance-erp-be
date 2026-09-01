@@ -1,0 +1,2 @@
+item_code,item_name,item_type,unit,warehouse,purchase_price,selling_price,opening_stock,opening_stock_date,minimum_stock,description,barcode,sales_account_code,inventory_account_code,cogs_account_code,purchase_account_code
+ITEM-IMPORT-DEMO-001,Demo Imported Accessory,inventory,PCS,WH-DEMO-01,100000,150000,0,,5,Upload fixture,,4101,1140,5101,5101

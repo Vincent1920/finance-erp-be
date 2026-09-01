@@ -1,0 +1,14 @@
+{
+  "posting_to_header_account": { "accountId": 1100, "debit": "100.00", "credit": "0.00" },
+  "unbalanced_journal": { "debit": "1000.00", "credit": "999.00" },
+  "inactive_customer": "CUST-DEMO-010",
+  "inactive_supplier": "SUP-DEMO-008",
+  "inactive_item": "ITEM-DEMO-020",
+  "invalid_tax_code": "TAX-NOT-FOUND",
+  "invalid_warehouse": "WH-NOT-FOUND",
+  "closed_accounting_period": "2025-12-31",
+  "duplicate_invoice_number": "INV-DEMO-001",
+  "insufficient_stock": { "item": "ITEM-DEMO-001", "quantity": "999999.0000" },
+  "circular_account_parent": ["DEMO-A", "DEMO-B", "DEMO-A"],
+  "missing_required_field": { "invoice_date": "2026-09-01" }
+}
