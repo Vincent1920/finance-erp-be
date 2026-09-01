@@ -15,8 +15,67 @@ const file = (name: string, content: Uint8Array | Buffer, type = '') => ({
   type,
   size: content.byteLength,
   arrayBuffer: async () =>
-    content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength) as ArrayBuffer,
+    content.buffer.slice(
+      content.byteOffset,
+      content.byteOffset + content.byteLength,
+    ) as ArrayBuffer,
 })
+
+const referenceExecutor = (existingSalesInvoice = false) =>
+  ({
+    execute: async (sql: string) => {
+      if (sql.includes('FROM accounts')) {
+        return [
+          [
+            {
+              id: 1,
+              code: '110100',
+              name: 'Kas',
+              is_posting: true,
+              allow_manual_journal: true,
+            },
+            {
+              id: 2,
+              code: '410100',
+              name: 'Penjualan',
+              is_posting: true,
+              allow_manual_journal: true,
+            },
+          ],
+        ]
+      }
+      if (sql.includes('FROM customers')) {
+        return [[{ id: 1, code: 'CUST-001', currency: 'IDR', receivable_account_id: 1 }]]
+      }
+      if (sql.includes('FROM suppliers')) {
+        return [[{ id: 1, code: 'SUP-001', currency: 'IDR', payable_account_id: 1 }]]
+      }
+      if (sql.includes('FROM items')) {
+        return [
+          [
+            {
+              id: 1,
+              sku: 'ITEM-001',
+              item_type: 'inventory',
+              unit_id: 1,
+              sales_account_id: 2,
+              inventory_account_id: 1,
+              purchase_account_id: 2,
+            },
+          ],
+        ]
+      }
+      if (sql.includes('FROM units')) return [[{ id: 1, code: 'PCS' }]]
+      if (sql.includes('FROM warehouses')) return [[{ id: 1, code: 'WH-01' }]]
+      if (sql.includes('FROM accounting_periods')) {
+        return [[{ id: 1, start_date: '2026-01-01', end_date: '2026-12-31' }]]
+      }
+      if (sql.includes('FROM sales_invoices')) {
+        return [existingSalesInvoice ? [{ reference: 'INV-EXISTING', party: 'CUST-001' }] : []]
+      }
+      return [[]]
+    },
+  }) as unknown as QueryExecutor
 
 describe('data import parser and templates', () => {
   test('accepts the duplicate preview filter exposed by the frontend', () => {
@@ -44,6 +103,20 @@ describe('data import parser and templates', () => {
     await expect(parseImportFile(file('bad.csv', missing, 'text/csv'), 'customer')).rejects.toThrow(
       'Kolom wajib tidak ditemukan',
     )
+  })
+
+  test('rejects malformed XLSX content', async () => {
+    const malformed = Buffer.from('this is not an xlsx workbook')
+    await expect(
+      parseImportFile(
+        file(
+          'broken.xlsx',
+          malformed,
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ),
+        'sales',
+      ),
+    ).rejects.toThrow('Signature file XLSX tidak valid')
   })
 
   test('generates round-trip CSV and XLSX templates for every import type', async () => {
@@ -148,5 +221,158 @@ describe('data import parser and templates', () => {
         row.issues.some((issue) => issue.code === 'account_hierarchy_cycle'),
       ),
     ).toBe(true)
+  })
+
+  test('reports invalid sales and purchase references with their fields and values', async () => {
+    const validation = new ImportValidationService()
+    const base = {
+      transaction_date: '2026-08-01',
+      invoice_number: 'INV-001',
+      item_code: 'ITEM-MISSING',
+      quantity: 1,
+      unit_price: 100,
+      discount: 0,
+      tax_code: '',
+      warehouse: 'WH-01',
+      due_date: '2026-08-31',
+      description: 'Negative test',
+    }
+
+    const sales = await validation.validate(
+      1,
+      'sales',
+      [{ rowNumber: 25, data: { ...base, customer_code: 'CUST-MISSING' } }],
+      referenceExecutor(),
+    )
+    expect(sales.rows[0]).toMatchObject({ rowNumber: 25, status: 'error' })
+    expect(sales.rows[0]?.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'customer_code',
+          value: 'CUST-MISSING',
+          code: 'reference_not_found',
+        }),
+        expect.objectContaining({
+          field: 'item_code',
+          value: 'ITEM-MISSING',
+          code: 'reference_not_found',
+        }),
+      ]),
+    )
+
+    const purchase = await validation.validate(
+      1,
+      'purchase',
+      [{ rowNumber: 8, data: { ...base, supplier_code: 'SUP-MISSING' } }],
+      referenceExecutor(),
+    )
+    expect(purchase.rows[0]?.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          field: 'supplier_code',
+          value: 'SUP-MISSING',
+          code: 'reference_not_found',
+        }),
+      ]),
+    )
+  })
+
+  test('rejects invalid quantity and an unbalanced journal with an invalid account', async () => {
+    const validation = new ImportValidationService()
+    const invalidQuantity = await validation.validate(
+      1,
+      'sales',
+      [
+        {
+          rowNumber: 2,
+          data: {
+            transaction_date: '2026-08-01',
+            invoice_number: 'INV-QTY',
+            customer_code: 'CUST-001',
+            item_code: 'ITEM-001',
+            quantity: 0,
+            unit_price: 100,
+            discount: 0,
+            tax_code: '',
+            warehouse: 'WH-01',
+            due_date: '2026-08-31',
+            description: 'Invalid quantity',
+          },
+        },
+      ],
+      referenceExecutor(),
+    )
+    expect(invalidQuantity.rows[0]?.issues.some((issue) => issue.field === 'quantity')).toBe(true)
+
+    const journal = await validation.validate(
+      1,
+      'journal',
+      [
+        {
+          rowNumber: 2,
+          data: {
+            journal_date: '2026-08-01',
+            reference: 'JV-INVALID',
+            description: 'Debit',
+            account_code: 'ACCOUNT-MISSING',
+            debit: 100,
+            credit: 0,
+            cost_center: '',
+            project: '',
+          },
+        },
+        {
+          rowNumber: 3,
+          data: {
+            journal_date: '2026-08-01',
+            reference: 'JV-INVALID',
+            description: 'Credit',
+            account_code: '410100',
+            debit: 0,
+            credit: 90,
+            cost_center: '',
+            project: '',
+          },
+        },
+      ],
+      referenceExecutor(),
+    )
+    expect(
+      journal.rows.every((row) => row.issues.some((issue) => issue.code === 'unbalanced_document')),
+    ).toBe(true)
+    expect(
+      journal.rows[0]?.issues.some(
+        (issue) => issue.field === 'account_code' && issue.code === 'reference_not_found',
+      ),
+    ).toBe(true)
+  })
+
+  test('marks an existing invoice as duplicate without overwriting it', async () => {
+    const validation = new ImportValidationService()
+    const result = await validation.validate(
+      1,
+      'sales',
+      [
+        {
+          rowNumber: 2,
+          data: {
+            transaction_date: '2026-08-01',
+            invoice_number: 'INV-EXISTING',
+            customer_code: 'CUST-001',
+            item_code: 'ITEM-001',
+            quantity: 1,
+            unit_price: 100,
+            discount: 0,
+            tax_code: '',
+            warehouse: 'WH-01',
+            due_date: '2026-08-31',
+            description: 'Duplicate invoice',
+          },
+        },
+      ],
+      referenceExecutor(true),
+    )
+    expect(result.rows[0]).toMatchObject({ isDuplicate: true, status: 'warning' })
+    expect(result.rows[0]?.issues.some((issue) => issue.code === 'duplicate_existing')).toBe(true)
   })
 })
