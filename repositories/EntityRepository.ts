@@ -75,8 +75,7 @@ export const entityDefinitions = {
     deleted: false,
   },
   bank_accounts: {
-    search:
-      "CONCAT(code, ' ', bank_name, ' ', account_number, ' ', account_name, ' ', currency)",
+    search: "CONCAT(code, ' ', bank_name, ' ', account_number, ' ', account_name, ' ', currency)",
     sort: ['code', 'bank_name', 'account_number', 'currency', 'current_balance', 'is_active', 'id'],
     defaultSort: 'bank_name',
     activeColumn: 'is_active',
@@ -93,7 +92,20 @@ type ListQuery = {
   order?: string
   is_active?: string
   status?: string
+  account_type?: string
+  is_posting?: string
+  is_header?: string
+  item_type?: string
+  tax_type?: string
 }
+
+const listFilters: Partial<Record<EntityTable, readonly string[]>> = {
+  accounts: ['account_type', 'is_posting', 'is_header'],
+  items: ['item_type'],
+  tax_codes: ['tax_type'],
+}
+
+const booleanQuery = (value: string) => value === 'true' || value === '1'
 
 const dependencies: Partial<Record<EntityTable, Array<[string, string]>>> = {
   accounts: [
@@ -178,7 +190,7 @@ export class EntityRepository {
     this.definition = entityDefinitions[table]
   }
 
-  async list(companyId: number, query: ListQuery) {
+  async list(companyId: number, query: ListQuery, connection: QueryExecutor = db) {
     const { page, limit, offset } = pagination(query.page, query.limit)
     const conditions = ['company_id = ?', `${this.definition.search} LIKE ?`]
     const values: DatabaseValue[] = [companyId, `%${query.search?.trim() ?? ''}%`]
@@ -186,11 +198,17 @@ export class EntityRepository {
     if (this.definition.deleted) conditions.push('deleted_at IS NULL')
     if (query.is_active !== undefined && this.definition.activeColumn === 'is_active') {
       conditions.push('is_active = ?')
-      values.push(query.is_active === 'true' || query.is_active === '1')
+      values.push(booleanQuery(query.is_active))
     }
     if (query.status && (this.table === 'projects' || this.table === 'accounting_periods')) {
       conditions.push('status = ?')
       values.push(query.status)
+    }
+    for (const field of listFilters[this.table] ?? []) {
+      const value = query[field as keyof ListQuery]
+      if (value === undefined || value === '') continue
+      conditions.push(`${field} = ?`)
+      values.push(field === 'is_posting' || field === 'is_header' ? booleanQuery(value) : value)
     }
 
     const requestedSort = query.sort ?? this.definition.defaultSort
@@ -200,7 +218,7 @@ export class EntityRepository {
     const order = query.order?.toLowerCase() === 'asc' ? 'ASC' : 'DESC'
     const where = conditions.join(' AND ')
 
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await connection.execute<RowDataPacket[]>(
       `SELECT *
        FROM ${this.table}
        WHERE ${where}
@@ -208,7 +226,7 @@ export class EntityRepository {
        LIMIT ? OFFSET ?`,
       [...values, limit, offset],
     )
-    const [count] = await db.execute<RowDataPacket[]>(
+    const [count] = await connection.execute<RowDataPacket[]>(
       `SELECT COUNT(*) AS total
        FROM ${this.table}
        WHERE ${where}`,
@@ -228,12 +246,10 @@ export class EntityRepository {
     return rows[0] ?? null
   }
 
-  async create(
-    companyId: number,
-    data: Record<string, unknown>,
-    connection: QueryExecutor = db,
-  ) {
-    const clean = Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined))
+  async create(companyId: number, data: Record<string, unknown>, connection: QueryExecutor = db) {
+    const clean = Object.fromEntries(
+      Object.entries(data).filter(([, value]) => value !== undefined),
+    )
     const columns = ['company_id', ...Object.keys(clean)]
     const values = [companyId, ...Object.values(clean)] as DatabaseValue[]
     const marks = columns.map(() => '?').join(', ')

@@ -21,6 +21,7 @@ export interface ReferenceCheck {
   companyId: number
   label: string
   postingOnly?: boolean
+  headerOnly?: boolean
 }
 
 export class BusinessValidationService {
@@ -43,6 +44,7 @@ export class BusinessValidationService {
     if (!allowedReferenceTables.has(input.table)) throw new Error('Reference table tidak diizinkan')
     const active = input.table === 'projects' ? "status <> 'inactive'" : 'is_active = TRUE'
     const posting = input.postingOnly && input.table === 'accounts' ? 'AND is_posting = TRUE' : ''
+    const header = input.headerOnly && input.table === 'accounts' ? 'AND is_header = TRUE' : ''
     const deleted = ['accounts', 'customers', 'suppliers', 'items', 'bank_accounts'].includes(
       input.table,
     )
@@ -51,7 +53,7 @@ export class BusinessValidationService {
     const [rows] = await connection.execute<RowDataPacket[]>(
       `SELECT id
        FROM ${input.table}
-       WHERE id = ? AND company_id = ? AND ${active} ${posting} ${deleted}
+       WHERE id = ? AND company_id = ? AND ${active} ${posting} ${header} ${deleted}
        LIMIT 1`,
       [input.id, input.companyId],
     )

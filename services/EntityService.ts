@@ -20,12 +20,33 @@ type ListQuery = {
   order?: string
   is_active?: string
   status?: string
+  account_type?: string
+  is_posting?: string
+  is_header?: string
+  item_type?: string
+  tax_type?: string
 }
 
 const referenceRules: Partial<
-  Record<EntityTable, Array<{ field: string; table: string; label: string; postingOnly?: boolean }>>
+  Record<
+    EntityTable,
+    Array<{
+      field: string
+      table: string
+      label: string
+      postingOnly?: boolean
+      headerOnly?: boolean
+    }>
+  >
 > = {
-  accounts: [{ field: 'parent_id', table: 'accounts', label: 'Akun induk' }],
+  accounts: [
+    {
+      field: 'parent_id',
+      table: 'accounts',
+      label: 'Akun induk',
+      headerOnly: true,
+    },
+  ],
   customers: [
     {
       field: 'receivable_account_id',
@@ -79,7 +100,11 @@ const referenceRules: Partial<
   ],
 }
 
-function normalizeData(table: EntityTable, data: Record<string, unknown>, context: MutationContext) {
+function normalizeData(
+  table: EntityTable,
+  data: Record<string, unknown>,
+  context: MutationContext,
+) {
   const normalized = { ...data }
   if (table === 'accounts' && normalized.is_header === true) normalized.is_posting = false
   if (table === 'bank_accounts') {
@@ -113,7 +138,9 @@ export class EntityService {
   }
 
   async create(companyId: number, data: Record<string, unknown>, context: MutationContext) {
-    return transaction((connection) => this.createInTransaction(connection, companyId, data, context))
+    return transaction((connection) =>
+      this.createInTransaction(connection, companyId, data, context),
+    )
   }
 
   async createInTransaction(
@@ -153,7 +180,9 @@ export class EntityService {
         data.status !== undefined &&
         data.status !== existing.status
       )
-        throw new ConflictError('Gunakan aksi tutup atau buka kembali untuk mengubah status periode')
+        throw new ConflictError(
+          'Gunakan aksi tutup atau buka kembali untuk mengubah status periode',
+        )
 
       const normalized = normalizeData(this.table, data, context)
       delete normalized.created_by
@@ -182,7 +211,8 @@ export class EntityService {
       const existing = await this.get(id, companyId, connection)
       const inUse = await this.repo.isInUse(id, companyId, connection)
       const result = await this.repo.remove(id, companyId, inUse, connection)
-      if (result === 'blocked') throw new ConflictError('Data sudah digunakan dan tidak dapat dihapus')
+      if (result === 'blocked')
+        throw new ConflictError('Data sudah digunakan dan tidak dapat dihapus')
       await this.audit.log(connection, {
         companyId,
         userId: context.userId,
@@ -208,7 +238,8 @@ export class EntityService {
       const id = data[rule.field]
       if (id === undefined || id === null) continue
       if (this.table === 'accounts' && rule.field === 'parent_id') {
-        if (Number(id) === currentId) throw new ConflictError('Akun tidak dapat menjadi induknya sendiri')
+        if (Number(id) === currentId)
+          throw new ConflictError('Akun tidak dapat menjadi induknya sendiri')
         if (
           currentId &&
           (await this.repo.hasAccountCycle(currentId, Number(id), companyId, connection))
@@ -221,6 +252,7 @@ export class EntityService {
         companyId,
         label: rule.label,
         postingOnly: rule.postingOnly,
+        headerOnly: rule.headerOnly,
       })
     }
   }
