@@ -154,6 +154,67 @@ export async function seedCore(connection: SeedConnection) {
   }
 
   const demoPasswordHash = await hashPassword('DemoFinance2026!')
+ const admin123PasswordHash = await hashPassword('Admin123')
+ 
+  await connection.execute(
+    `INSERT INTO users (
+       company_id,
+       name,
+       email,
+       password,
+       status,
+       password_changed_at
+     )
+     VALUES (
+       1,
+       'Administrator',
+       'admin123@gmial.com',
+       ?,
+       'active',
+       CURRENT_TIMESTAMP
+     )
+     ON DUPLICATE KEY UPDATE
+       company_id = VALUES(company_id),
+       name = VALUES(name),
+       password = VALUES(password),
+       status = VALUES(status),
+       password_changed_at = CURRENT_TIMESTAMP`,
+    [admin123PasswordHash],
+  )
+
+  const [admin123Rows] = await connection.execute<
+    (RowDataPacket & { id: number })[]
+  >(
+    `SELECT id
+       FROM users
+      WHERE email = ?
+      LIMIT 1`,
+    ['admin123@gmial.com'],
+  )
+
+  const admin123UserId = admin123Rows[0]?.id
+
+  if (!admin123UserId) {
+    throw new Error('Seeder gagal menemukan akun admin123')
+  }
+
+  await connection.execute(
+    `DELETE FROM user_roles
+      WHERE user_id = ?`,
+    [admin123UserId],
+  )
+
+  await connection.execute(
+    `INSERT INTO user_roles (
+       user_id,
+       role_id
+     )
+     SELECT ?, id
+       FROM roles
+      WHERE slug = 'super-admin'
+      LIMIT 1`,
+    [admin123UserId],
+  )
 
   await connection.execute(
     `INSERT INTO users (
