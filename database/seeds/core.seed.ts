@@ -168,7 +168,7 @@ export async function seedCore(connection: SeedConnection) {
      VALUES (
        1,
        'Administrator',
-       'admin123@gmial.com',
+       'admin123@gmail.com',
        ?,
        'active',
        CURRENT_TIMESTAMP
@@ -189,7 +189,7 @@ export async function seedCore(connection: SeedConnection) {
        FROM users
       WHERE email = ?
       LIMIT 1`,
-    ['admin123@gmial.com'],
+    ['admin123@gmail.com'],
   )
 
   const admin123UserId = admin123Rows[0]?.id
