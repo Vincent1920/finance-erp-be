@@ -17,7 +17,12 @@ type LogQuery = {
   user_id?: string
 }
 
-function dateFilters(query: LogQuery, conditions: string[], values: DatabaseValue[], alias: string) {
+function dateFilters(
+  query: LogQuery,
+  conditions: string[],
+  values: DatabaseValue[],
+  alias: string,
+) {
   if (query.date_from) {
     conditions.push(`${alias}.created_at >= ?`)
     values.push(`${query.date_from} 00:00:00`)
@@ -57,7 +62,7 @@ export class LogRepository {
     }
     dateFilters(query, conditions, values, 'a')
     const where = conditions.join(' AND ')
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT a.id, a.user_id, u.name AS user_name, a.module, a.action,
               a.record_type, a.record_id, a.record_number, a.ip, a.request_id,
               a.request_method, a.request_path, a.created_at
@@ -76,7 +81,7 @@ export class LogRepository {
   }
 
   async auditFind(id: number, companyId: number) {
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT a.*, u.name AS user_name, u.email AS user_email
        FROM audit_logs a
        LEFT JOIN users u ON u.id = a.user_id
@@ -100,15 +105,17 @@ export class LogRepository {
       conditions.push('e.level = ?')
       values.push(query.level)
     }
-    if (query.resolved === 'true' || query.resolved === '1') conditions.push('e.resolved_at IS NOT NULL')
-    if (query.resolved === 'false' || query.resolved === '0') conditions.push('e.resolved_at IS NULL')
+    if (query.resolved === 'true' || query.resolved === '1')
+      conditions.push('e.resolved_at IS NOT NULL')
+    if (query.resolved === 'false' || query.resolved === '0')
+      conditions.push('e.resolved_at IS NULL')
     if (query.request_id) {
       conditions.push('e.request_id = ?')
       values.push(query.request_id)
     }
     dateFilters(query, conditions, values, 'e')
     const where = conditions.join(' AND ')
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT e.id, e.user_id, u.name AS user_name, e.request_id, e.level, e.category,
               e.message, e.error_code, e.path, e.method, e.created_at,
               e.resolved_at, e.resolved_by, resolver.name AS resolved_by_name,

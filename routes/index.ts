@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 
 import { DashboardController } from '../controllers/DashboardController'
+import { SearchController } from '../controllers/SearchController'
 import { authMiddleware } from '../middleware/auth.middleware'
 import { requirePermission } from '../middleware/permission.middleware'
 import {
@@ -29,15 +30,21 @@ import sales from './sales.routes'
 import purchases from './purchase.routes'
 import settings from './settings.routes'
 import users from './users.routes'
+import { auditLogs, errorLogs } from './logs.routes'
 
 const route = new Hono()
 const dashboard = new DashboardController()
+const search = new SearchController()
 
 route.get('/health', dashboard.health)
 route.route('/auth', auth)
 
 route.use('/dashboard/*', authMiddleware)
 route.get('/dashboard/summary', requirePermission('dashboard.view'), dashboard.summary)
+route.use('/transactions/*', authMiddleware)
+route.get('/transactions', requirePermission('transaction-browser.view'), search.transactions)
+route.use('/global-search/*', authMiddleware)
+route.get('/global-search', requirePermission('global-search.view'), search.global)
 
 route.use('/accounting-periods/*', authMiddleware)
 route.route(
@@ -103,5 +110,10 @@ route.route('/permissions', permissions)
 
 route.use('/settings/*', authMiddleware)
 route.route('/settings', settings)
+
+route.use('/audit-logs/*', authMiddleware)
+route.route('/audit-logs', auditLogs)
+route.use('/error-logs/*', authMiddleware)
+route.route('/error-logs', errorLogs)
 
 export default route
