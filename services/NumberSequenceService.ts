@@ -17,6 +17,7 @@ const defaultSequences: Record<string, { prefix: string; padding: number }> = {
   sales_return: { prefix: 'SR-{YYYY}-', padding: 6 },
   customer_payment: { prefix: 'CR-{YYYY}-', padding: 6 },
   purchase_order: { prefix: 'PO-{YYYY}-', padding: 6 },
+  goods_receipt: { prefix: 'GR-{YYYY}-', padding: 6 },
   purchase_invoice: { prefix: 'PI-{YYYY}-', padding: 6 },
   purchase_return: { prefix: 'PR-{YYYY}-', padding: 6 },
   supplier_payment: { prefix: 'CP-{YYYY}-', padding: 6 },

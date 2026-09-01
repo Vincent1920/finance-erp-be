@@ -26,6 +26,7 @@ import permissions from './permissions.routes'
 import reports from './reports.routes'
 import roles from './roles.routes'
 import sales from './sales.routes'
+import purchases from './purchase.routes'
 import settings from './settings.routes'
 import users from './users.routes'
 
@@ -84,7 +85,9 @@ route.use('/imports/*', authMiddleware)
 route.route('/imports', imports)
 
 route.use('/sales/*', authMiddleware)
+route.use('/purchases/*', authMiddleware)
 route.route('/sales', sales)
+route.route('/purchases', purchases)
 
 route.use('/reports/*', authMiddleware)
 route.route('/reports', reports)

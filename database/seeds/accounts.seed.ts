@@ -10,6 +10,7 @@ const accounts = [
   ['1210', 'Accumulated Depreciation', 'asset', 'credit'],
   ['2000', 'Liabilities', 'liability', 'credit'],
   ['2100', 'Accounts Payable', 'liability', 'credit'],
+  ['2110', 'Goods Received Not Invoiced', 'liability', 'credit'],
   ['2200', 'Tax Payable', 'liability', 'credit'],
   ['3000', 'Equity', 'equity', 'credit'],
   ['3100', 'Capital', 'equity', 'credit'],
@@ -33,4 +34,10 @@ export async function seedAccounts(connection: SeedConnection) {
       'INSERT IGNORE INTO accounts(company_id,code,name,account_type,normal_balance,is_header,is_posting) VALUES(1,?,?,?,?,?,?)',
       [code, name, type, normal, code.endsWith('00'), !code.endsWith('00')],
     )
+  await connection.execute(
+    `INSERT INTO settings(company_id,setting_key,setting_value)
+     SELECT 1,'goods_received_not_invoiced_account_id',CAST(id AS CHAR)
+     FROM accounts WHERE company_id=1 AND code='2110'
+     ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)`,
+  )
 }

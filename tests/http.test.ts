@@ -25,6 +25,8 @@ describe('HTTP smoke tests', () => {
     '/api/sales/invoices',
     '/api/sales/receivables/aging?as_of_date=2026-09-01',
     '/api/sales/returns',
+    '/api/purchases/orders',
+    '/api/purchases/receipts',
     '/api/inventory/stock',
     '/api/imports/config',
     '/api/imports',
