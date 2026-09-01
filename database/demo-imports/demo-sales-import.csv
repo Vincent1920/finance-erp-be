@@ -1,0 +1,3 @@
+transaction_date,invoice_number,customer_code,item_code,quantity,unit_price,discount,tax_code,warehouse,due_date,description
+2026-09-01,INV-IMPORT-DEMO-001,CUST-DEMO-001,ITEM-DEMO-001,1,8500000,0,PPN-OUT,WH-DEMO-01,2026-09-30,Demo import sales
+2026-09-01,INV-IMPORT-DEMO-001,CUST-DEMO-001,ITEM-DEMO-003,2,650000,0,PPN-OUT,WH-DEMO-01,2026-09-30,Demo import sales

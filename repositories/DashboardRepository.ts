@@ -45,9 +45,9 @@ export class DashboardRepository {
            FROM journals
            WHERE company_id = ? AND status = 'posted'
          ) AS postedJournals,
-         (SELECT COALESCE(SUM(base_outstanding_amount), 0) FROM sales_invoices
+         (SELECT COALESCE(SUM(outstanding_amount * exchange_rate), 0) FROM sales_invoices
           WHERE company_id = ? AND status IN ('posted', 'partially_paid')) AS receivables,
-         (SELECT COALESCE(SUM(base_outstanding_amount), 0) FROM purchase_invoices
+         (SELECT COALESCE(SUM(outstanding_amount * exchange_rate), 0) FROM purchase_invoices
           WHERE company_id = ? AND status IN ('posted', 'partially_paid')) AS payables,
          (SELECT COALESCE(SUM(total_value), 0) FROM inventory_balances WHERE company_id = ?) AS inventoryValue,
          (SELECT COALESCE(SUM(current_balance), 0) FROM bank_accounts

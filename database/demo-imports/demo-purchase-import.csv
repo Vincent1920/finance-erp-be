@@ -1,0 +1,3 @@
+transaction_date,invoice_number,supplier_code,item_code,quantity,unit_price,discount,tax_code,warehouse,due_date,description
+2026-09-01,PUR-IMPORT-DEMO-001,SUP-DEMO-001,ITEM-DEMO-001,2,7000000,0,PPN-IN,WH-DEMO-01,2026-09-30,Demo purchase import
+2026-09-01,PUR-IMPORT-DEMO-001,SUP-DEMO-001,ITEM-DEMO-003,5,450000,0,PPN-IN,WH-DEMO-01,2026-09-30,Demo purchase import

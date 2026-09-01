@@ -1,0 +1,3 @@
+journal_date,reference,description,account_code,debit,credit,cost_center,project
+2026-09-10,JRN-IMPORT-DEMO-001,Demo imported office expense,6105,2500000,0,CC-DEMO-HO,PRJ-DEMO-001
+2026-09-10,JRN-IMPORT-DEMO-001,Demo imported office expense,1101,0,2500000,CC-DEMO-HO,PRJ-DEMO-001

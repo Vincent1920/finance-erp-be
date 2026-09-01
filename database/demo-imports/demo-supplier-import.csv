@@ -1,0 +1,2 @@
+supplier_code,supplier_name,email,phone,address,city,tax_number,payment_term,currency,payable_account_code,opening_balance,opening_balance_date,opening_balance_offset_account_code
+SUP-IMPORT-DEMO-001,PT Supplier Import Demo,finance@supplier-demo.invalid,0218882222,Alamat Demo,Bandung,,30,IDR,2101,0,,

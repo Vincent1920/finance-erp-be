@@ -159,7 +159,7 @@ export class InvoiceRepository {
         created_at: 'pi.created_at',
       },
       offset = (query.page - 1) * query.limit
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT pi.id,pi.invoice_number,pi.supplier_invoice_number,pi.invoice_date,pi.due_date,pi.reference,pi.currency,pi.grand_total,pi.paid_amount,pi.outstanding_amount,pi.payment_status,pi.status,pi.approval_status,pi.version,pi.purchase_order_id,pi.goods_receipt_id,pi.created_at,s.id supplier_id,s.code supplier_code,s.name supplier_name,COUNT(pil.id) line_count FROM purchase_invoices pi INNER JOIN suppliers s ON s.id=pi.supplier_id LEFT JOIN purchase_invoice_lines pil ON pil.purchase_invoice_id=pi.id WHERE ${where} GROUP BY pi.id ORDER BY ${sorts[query.sort] ?? 'pi.invoice_date'} ${query.order.toUpperCase()},pi.id DESC LIMIT ? OFFSET ?`,
       [...values, query.limit, offset],
     )
@@ -294,7 +294,7 @@ export class InvoiceRepository {
       created_at: 'si.created_at',
     }
     const offset = (query.page - 1) * query.limit
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT si.id, si.invoice_number, si.invoice_date, si.due_date, si.reference, si.currency, si.grand_total, si.paid_amount, si.outstanding_amount, si.payment_status, si.status, si.approval_status, si.version, si.created_at, c.id AS customer_id, c.code AS customer_code, c.name AS customer_name, COUNT(sil.id) AS line_count FROM sales_invoices si INNER JOIN customers c ON c.id = si.customer_id LEFT JOIN sales_invoice_lines sil ON sil.sales_invoice_id = si.id WHERE ${where} GROUP BY si.id ORDER BY ${sorts[query.sort] ?? 'si.invoice_date'} ${query.order.toUpperCase()}, si.id DESC LIMIT ? OFFSET ?`,
       [...values, query.limit, offset],
     )

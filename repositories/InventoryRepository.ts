@@ -106,7 +106,7 @@ export class InventoryRepository {
     }
     if (query.status === 'available') conditions.push('ib.quantity > i.minimum_stock')
     const where = conditions.join(' AND ')
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT
          ib.id,
          ib.item_id,
@@ -172,7 +172,7 @@ export class InventoryRepository {
          AND im.movement_date < ?`,
       [...baseValues, query.dateFrom],
     )
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT
          im.*,
          i.sku,
@@ -292,7 +292,9 @@ export class InventoryRepository {
        LIMIT 1`,
       [companyId],
     )
-    const value = String(rows[0]?.setting_value ?? 'false').replaceAll('"', '').toLowerCase()
+    const value = String(rows[0]?.setting_value ?? 'false')
+      .replaceAll('"', '')
+      .toLowerCase()
     return value === 'true' || value === '1'
   }
 }

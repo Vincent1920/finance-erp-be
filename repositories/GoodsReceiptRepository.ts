@@ -18,7 +18,7 @@ export class GoodsReceiptRepository {
     }
     const w = where.join(' AND '),
       offset = (q.page - 1) * q.limit,
-      [rows] = await db.execute<RowDataPacket[]>(
+      [rows] = await db.query<RowDataPacket[]>(
         `SELECT gr.*,po.order_number,s.code supplier_code,s.name supplier_name,w.code warehouse_code,COUNT(grl.id) line_count FROM goods_receipts gr INNER JOIN purchase_orders po ON po.id=gr.purchase_order_id INNER JOIN suppliers s ON s.id=gr.supplier_id INNER JOIN warehouses w ON w.id=gr.warehouse_id LEFT JOIN goods_receipt_lines grl ON grl.goods_receipt_id=gr.id WHERE ${w} GROUP BY gr.id ORDER BY gr.receipt_date DESC,gr.id DESC LIMIT ? OFFSET ?`,
         [...v, q.limit, offset],
       ),

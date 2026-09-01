@@ -207,14 +207,14 @@ export class ImportRepository {
     }
     const where = conditions.join(' AND ')
     const offset = (query.page - 1) * query.limit
-    const [rows] = await db.execute<ImportJobDbRow[]>(
+    const [rows] = await db.query<ImportJobDbRow[]>(
       `SELECT j.*, u.name AS requested_by_name
        FROM import_jobs j
        INNER JOIN users u ON u.id = j.requested_by
        WHERE ${where}
        ORDER BY j.created_at DESC, j.id DESC
-       LIMIT ? OFFSET ?`,
-      [...values, query.limit, offset],
+       LIMIT ${query.limit} OFFSET ${offset}`,
+      values,
     )
     const [counts] = await db.execute<(RowDataPacket & { total: number })[]>(
       `SELECT COUNT(*) AS total FROM import_jobs j WHERE ${where}`,

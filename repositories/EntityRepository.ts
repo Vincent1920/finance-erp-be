@@ -223,8 +223,8 @@ export class EntityRepository {
        FROM ${this.table}
        WHERE ${where}
        ORDER BY ${sort} ${order}, id DESC
-       LIMIT ? OFFSET ?`,
-      [...values, limit, offset],
+       LIMIT ${limit} OFFSET ${offset}`,
+      values,
     )
     const [count] = await connection.execute<RowDataPacket[]>(
       `SELECT COUNT(*) AS total

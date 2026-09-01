@@ -63,7 +63,7 @@ export class ReportRepository {
       values.push(search, search, search)
     }
 
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `WITH opening AS (
          SELECT jl.account_id, COALESCE(SUM(jl.debit - jl.credit), 0) AS balance
          FROM journal_lines jl

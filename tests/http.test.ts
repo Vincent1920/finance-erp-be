@@ -28,6 +28,8 @@ describe('HTTP smoke tests', () => {
     '/api/purchases/orders',
     '/api/purchases/receipts',
     '/api/purchases/invoices',
+    '/api/transactions?search=DEMO',
+    '/api/global-search?q=DEMO',
     '/api/inventory/stock',
     '/api/imports/config',
     '/api/imports',

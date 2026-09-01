@@ -34,7 +34,7 @@ export class GoodsReceiptService {
     return transaction(async (q) => {
       const order = await this.repo.order(q, input.purchase_order_id, c)
       if (!order) throw new NotFoundError('Purchase order aktif tidak ditemukan')
-      if (input.receipt_date < String(order.order_date).slice(0, 10))
+      if (input.receipt_date < this.dateOnly(order.order_date))
         throw new ValidationError('Tanggal penerimaan tidak boleh sebelum purchase order')
       const source = await this.repo.orderLines(q, input.purchase_order_id),
         byId = new Map(source.map((v) => [Number(v.id), v]))
@@ -145,7 +145,7 @@ export class GoodsReceiptService {
             transactionId: id,
             sourceLineId: Number(l.id),
             transactionNumber: String(h.receipt_number),
-            movementDate: String(h.receipt_date).slice(0, 10),
+            movementDate: this.dateOnly(h.receipt_date),
             reference: h.reference ? String(h.reference) : null,
             postingKey: `goods-receipt:${id}:line:${l.id}`,
             userId: x.userId,
@@ -177,7 +177,7 @@ export class GoodsReceiptService {
         companyId: c,
         sourceType: 'goods_receipt',
         sourceId: id,
-        date: String(h.receipt_date).slice(0, 10),
+        date: this.dateOnly(h.receipt_date),
         reference: String(h.receipt_number),
         description: `Penerimaan ${h.receipt_number}`,
         lines: journals,
@@ -285,5 +285,9 @@ export class GoodsReceiptService {
       requestId: x.requestId,
       ip: x.ip,
     })
+  }
+
+  private dateOnly(value: Date | string) {
+    return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10)
   }
 }
