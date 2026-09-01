@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { EntityRepository } from '../repositories/EntityRepository'
+import { normalizeSearchPagination } from '../repositories/SearchRepository'
 import { BusinessValidationService } from '../services/BusinessValidationService'
 import type { QueryExecutor } from '../types/database'
 
@@ -33,7 +34,8 @@ describe('master data list contracts', () => {
       expect(call.sql).toContain('is_header = ?')
       expect(call.sql).toContain('is_posting = ?')
     }
-    expect(calls[0]?.values).toEqual([7, '%%', true, 'asset', false, true, 20, 0])
+    expect(calls[0]?.values).toEqual([7, '%%', true, 'asset', false, true])
+    expect(calls[0]?.sql).toContain('LIMIT 20 OFFSET 0')
     expect(calls[1]?.values).toEqual([7, '%%', true, 'asset', false, true])
   })
 
@@ -55,5 +57,18 @@ describe('master data list contracts', () => {
         headerOnly: true,
       }),
     ).resolves.toEqual(undefined)
+  })
+
+  test('normalizes transaction pagination without allowing SQL-shaped input', () => {
+    expect(normalizeSearchPagination('2', '25')).toEqual({ page: 2, limit: 25 })
+    expect(normalizeSearchPagination(3, 1_000)).toEqual({ page: 3, limit: 100 })
+    expect(normalizeSearchPagination('1; DROP TABLE journals', '20 OR 1=1')).toEqual({
+      page: 1,
+      limit: 20,
+    })
+    expect(normalizeSearchPagination(-2, Number.POSITIVE_INFINITY)).toEqual({
+      page: 1,
+      limit: 20,
+    })
   })
 })

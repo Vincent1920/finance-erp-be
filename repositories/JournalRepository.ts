@@ -96,7 +96,7 @@ export class JournalRepository {
       values.push(query.sourceType)
     }
     const where = conditions.join(' AND ')
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT
          j.*,
          creator.name AS created_by_name,
@@ -242,7 +242,10 @@ export class JournalRepository {
   async updateDraft(
     connection: QueryExecutor,
     id: number,
-    input: Omit<JournalWrite, 'companyId' | 'number' | 'sourceType' | 'sourceId' | 'status' | 'userId'>,
+    input: Omit<
+      JournalWrite,
+      'companyId' | 'number' | 'sourceType' | 'sourceId' | 'status' | 'userId'
+    >,
   ) {
     await connection.execute(
       `UPDATE journals
@@ -265,7 +268,11 @@ export class JournalRepository {
     await this.insertLines(connection, id, input.lines)
   }
 
-  private async insertLines(connection: QueryExecutor, journalId: number, lines: JournalLineWrite[]) {
+  private async insertLines(
+    connection: QueryExecutor,
+    journalId: number,
+    lines: JournalLineWrite[],
+  ) {
     for (const [index, line] of lines.entries()) {
       await connection.execute(
         `INSERT INTO journal_lines (
@@ -313,7 +320,11 @@ export class JournalRepository {
       'cancellation_reason',
     ])
     const entries = Object.entries(fields).filter(([field]) => allowedFields.has(field))
-    const assignments = ['status = ?', 'version = version + 1', ...entries.map(([field]) => `${field} = ?`)]
+    const assignments = [
+      'status = ?',
+      'version = version + 1',
+      ...entries.map(([field]) => `${field} = ?`),
+    ]
     await connection.execute(`UPDATE journals SET ${assignments.join(', ')} WHERE id = ?`, [
       status,
       ...entries.map(([, value]) => value),

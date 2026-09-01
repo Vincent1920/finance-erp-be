@@ -22,7 +22,7 @@ export class RoleRepository {
   async list(companyId: number, query: { page?: string; limit?: string; search?: string }) {
     const { page, limit, offset } = pagination(query.page, query.limit)
     const search = `%${query.search?.trim() ?? ''}%`
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT r.id, r.company_id, r.name, r.slug, r.description, r.is_system, r.is_active,
               r.created_at, r.updated_at, COUNT(DISTINCT rp.permission_id) AS permission_count,
               COUNT(DISTINCT ur.user_id) AS user_count
@@ -130,7 +130,7 @@ export class RoleRepository {
       values.push(query.module)
     }
     const where = conditions.join(' AND ')
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT id, module, action, name, slug, created_at
        FROM permissions WHERE ${where}
        ORDER BY module, action LIMIT ? OFFSET ?`,

@@ -88,7 +88,7 @@ export class SalesOrderRepository {
       created_at: 'so.created_at',
     }
     const offset = (query.page - 1) * query.limit
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT so.id, so.order_number, so.order_date, so.expected_date, so.reference,
               so.currency, so.grand_total, so.status, so.fulfillment_status, so.version,
               so.created_at, c.id AS customer_id, c.code AS customer_code,
@@ -187,10 +187,24 @@ export class SalesOrderRepository {
          subtotal, discount, tax, grand_total, base_grand_total, notes, status, created_by
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
       [
-        input.companyId, input.orderNumber, input.orderDate, input.customerId, input.warehouseId,
-        input.salesPersonId, input.paymentTermDays, input.expectedDate, input.reference,
-        input.currency, input.exchangeRate, input.subtotal, input.discount, input.tax,
-        input.grandTotal, input.baseGrandTotal, input.notes, input.userId,
+        input.companyId,
+        input.orderNumber,
+        input.orderDate,
+        input.customerId,
+        input.warehouseId,
+        input.salesPersonId,
+        input.paymentTermDays,
+        input.expectedDate,
+        input.reference,
+        input.currency,
+        input.exchangeRate,
+        input.subtotal,
+        input.discount,
+        input.tax,
+        input.grandTotal,
+        input.baseGrandTotal,
+        input.notes,
+        input.userId,
       ],
     )
     await this.replaceLines(connection, result.insertId, input.lines)
@@ -205,10 +219,25 @@ export class SalesOrderRepository {
          grand_total = ?, base_grand_total = ?, notes = ?, updated_by = ?, version = version + 1
        WHERE id = ? AND company_id = ? AND status = 'draft' AND version = ?`,
       [
-        input.orderDate, input.customerId, input.warehouseId, input.salesPersonId,
-        input.paymentTermDays, input.expectedDate, input.reference, input.currency,
-        input.exchangeRate, input.subtotal, input.discount, input.tax, input.grandTotal,
-        input.baseGrandTotal, input.notes, input.userId, id, input.companyId, version,
+        input.orderDate,
+        input.customerId,
+        input.warehouseId,
+        input.salesPersonId,
+        input.paymentTermDays,
+        input.expectedDate,
+        input.reference,
+        input.currency,
+        input.exchangeRate,
+        input.subtotal,
+        input.discount,
+        input.tax,
+        input.grandTotal,
+        input.baseGrandTotal,
+        input.notes,
+        input.userId,
+        id,
+        input.companyId,
+        version,
       ],
     )
     if (!result.affectedRows) return false
@@ -226,9 +255,20 @@ export class SalesOrderRepository {
            tax_amount, subtotal, base_subtotal
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          id, line.lineNumber, line.itemId, line.description, line.quantity, line.unitId,
-          line.unitPrice, line.discountPercent, line.discountAmount, line.taxCodeId,
-          line.taxRate, line.taxAmount, line.subtotal, line.baseSubtotal,
+          id,
+          line.lineNumber,
+          line.itemId,
+          line.description,
+          line.quantity,
+          line.unitId,
+          line.unitPrice,
+          line.discountPercent,
+          line.discountAmount,
+          line.taxCodeId,
+          line.taxRate,
+          line.taxAmount,
+          line.subtotal,
+          line.baseSubtotal,
         ],
       )
     }
@@ -257,7 +297,10 @@ export class SalesOrderRepository {
     invoiceId: number,
     lines: Array<{ orderLineId: number; quantity: string; invoiceLineNumber: number }>,
   ) {
-    await connection.execute('UPDATE sales_invoices SET sales_order_id = ? WHERE id = ?', [orderId, invoiceId])
+    await connection.execute('UPDATE sales_invoices SET sales_order_id = ? WHERE id = ?', [
+      orderId,
+      invoiceId,
+    ])
     for (const line of lines) {
       await connection.execute(
         `UPDATE sales_invoice_lines SET sales_order_line_id = ?
@@ -276,7 +319,10 @@ export class SalesOrderRepository {
       [orderId],
     )
     const status = Number(remaining[0]?.remaining ?? 0) === 0 ? 'invoiced' : 'partially_invoiced'
-    await connection.execute('UPDATE sales_orders SET status = ?, version = version + 1 WHERE id = ?', [status, orderId])
+    await connection.execute(
+      'UPDATE sales_orders SET status = ?, version = version + 1 WHERE id = ?',
+      [status, orderId],
+    )
     return status
   }
 }

@@ -86,7 +86,7 @@ export class PurchaseOrderRepository {
         created_at: 'po.created_at',
       },
       offset = (q.page - 1) * q.limit
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT po.id,po.order_number,po.order_date,po.expected_date,po.supplier_reference,po.currency,po.grand_total,po.status,po.receipt_status,po.billing_status,po.version,po.created_at,s.id supplier_id,s.code supplier_code,s.name supplier_name,w.code warehouse_code,w.name warehouse_name,COUNT(pol.id) line_count FROM purchase_orders po INNER JOIN suppliers s ON s.id=po.supplier_id INNER JOIN warehouses w ON w.id=po.warehouse_id LEFT JOIN purchase_order_lines pol ON pol.purchase_order_id=po.id WHERE ${where} GROUP BY po.id ORDER BY ${sorts[q.sort] ?? 'po.order_date'} ${q.order.toUpperCase()},po.id DESC LIMIT ? OFFSET ?`,
       [...values, q.limit, offset],
     )

@@ -24,7 +24,7 @@ export class SystemUserRepository {
       values.push(query.status)
     }
     const where = conditions.join(' AND ')
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT u.id, u.company_id, u.name, u.email, u.status, u.last_login_at,
               u.locked_at, u.password_changed_at, u.created_at, u.updated_at,
               COALESCE(GROUP_CONCAT(DISTINCT r.slug ORDER BY r.slug SEPARATOR ','), '') AS role_slugs

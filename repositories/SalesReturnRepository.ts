@@ -19,7 +19,7 @@ export class SalesReturnRepository {
     }
     const where = conditions.join(' AND '),
       offset = (q.page - 1) * q.limit
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await db.query<RowDataPacket[]>(
       `SELECT sr.*,c.code customer_code,c.name customer_name,si.invoice_number,COUNT(srl.id) line_count FROM sales_returns sr INNER JOIN customers c ON c.id=sr.customer_id INNER JOIN sales_invoices si ON si.id=sr.sales_invoice_id LEFT JOIN sales_return_lines srl ON srl.sales_return_id=sr.id WHERE ${where} GROUP BY sr.id ORDER BY sr.return_date DESC,sr.id DESC LIMIT ? OFFSET ?`,
       [...values, q.limit, offset],
     )
@@ -85,7 +85,7 @@ export class SalesReturnRepository {
     )
     for (const [i, l] of lines.entries())
       await connection.execute(
-        `INSERT INTO sales_return_lines(sales_return_id,sales_invoice_line_id,line_number,item_id,description,quantity,unit_id,unit_price,discount,tax_code_id,tax_rate,tax_amount,subtotal,base_subtotal,cogs_amount,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO sales_return_lines(sales_return_id,sales_invoice_line_id,line_number,item_id,description,quantity,unit_id,unit_price,discount,tax_code_id,tax_rate,tax_amount,subtotal,base_subtotal,cogs_amount,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           r.insertId,
           l.invoiceLineId,
