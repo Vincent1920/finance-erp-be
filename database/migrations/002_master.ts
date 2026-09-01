@@ -25,7 +25,7 @@ CREATE TABLE customers(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   FOREIGN KEY(receivable_account_id) REFERENCES accounts(id),
   INDEX idx_customer_name(company_id,
   name,
-  is_active)) ENGINE=InnoDB;
+  is_active)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE suppliers(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   code VARCHAR(30) NOT NULL,
@@ -44,7 +44,7 @@ CREATE TABLE suppliers(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   UNIQUE KEY uq_supplier(company_id,
   code),
   FOREIGN KEY(company_id) REFERENCES companies(id),
-  FOREIGN KEY(payable_account_id) REFERENCES accounts(id)) ENGINE=InnoDB;
+  FOREIGN KEY(payable_account_id) REFERENCES accounts(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE units(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   code VARCHAR(30) NOT NULL,
@@ -53,7 +53,7 @@ CREATE TABLE units(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   UNIQUE KEY uq_unit(company_id,
   code),
-  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB;
+  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE warehouses(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   code VARCHAR(30) NOT NULL,
@@ -64,7 +64,7 @@ CREATE TABLE warehouses(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_warehouse(company_id,
   code),
-  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB;
+  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE tax_codes(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   code VARCHAR(30) NOT NULL,
@@ -83,7 +83,7 @@ CREATE TABLE tax_codes(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   code),
   FOREIGN KEY(company_id) REFERENCES companies(id),
   FOREIGN KEY(input_tax_account_id) REFERENCES accounts(id),
-  FOREIGN KEY(output_tax_account_id) REFERENCES accounts(id)) ENGINE=InnoDB;
+  FOREIGN KEY(output_tax_account_id) REFERENCES accounts(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE cost_centers(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   code VARCHAR(30) NOT NULL,
@@ -92,7 +92,7 @@ CREATE TABLE cost_centers(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   UNIQUE KEY uq_cost_center(company_id,
   code),
-  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB;
+  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE projects(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   code VARCHAR(30) NOT NULL,
@@ -107,7 +107,7 @@ CREATE TABLE projects(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   UNIQUE KEY uq_project(company_id,
   code),
   FOREIGN KEY(company_id) REFERENCES companies(id),
-  FOREIGN KEY(customer_id) REFERENCES customers(id)) ENGINE=InnoDB;
+  FOREIGN KEY(customer_id) REFERENCES customers(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE items(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   sku VARCHAR(50) NOT NULL,
@@ -141,7 +141,7 @@ CREATE TABLE items(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   FOREIGN KEY(sales_account_id) REFERENCES accounts(id),
   FOREIGN KEY(inventory_account_id) REFERENCES accounts(id),
   FOREIGN KEY(cogs_account_id) REFERENCES accounts(id),
-  FOREIGN KEY(purchase_account_id) REFERENCES accounts(id)) ENGINE=InnoDB;`),
+  FOREIGN KEY(purchase_account_id) REFERENCES accounts(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`),
   down: async (db: { query: (sql: string) => Promise<unknown> }) => {
     for (const t of [
       'items',

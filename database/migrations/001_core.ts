@@ -19,7 +19,7 @@ CREATE TABLE roles(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   slug VARCHAR(100) NOT NULL UNIQUE,
   description TEXT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB;
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE permissions(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   module VARCHAR(100) NOT NULL,
   action VARCHAR(50) NOT NULL,
@@ -27,7 +27,7 @@ CREATE TABLE permissions(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   slug VARCHAR(191) NOT NULL UNIQUE,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_permission(module,
-  action)) ENGINE=InnoDB;
+  action)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE users(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   name VARCHAR(150) NOT NULL,
@@ -42,19 +42,19 @@ CREATE TABLE users(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   deleted_at DATETIME NULL,
   CONSTRAINT fk_users_company FOREIGN KEY(company_id) REFERENCES companies(id),
   INDEX idx_users_company_status(company_id,
-  status)) ENGINE=InnoDB;
+  status)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE user_roles(user_id BIGINT UNSIGNED NOT NULL,
   role_id BIGINT UNSIGNED NOT NULL,
   PRIMARY KEY(user_id,
   role_id),
   FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-  FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE) ENGINE=InnoDB;
+  FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE role_permissions(role_id BIGINT UNSIGNED NOT NULL,
   permission_id BIGINT UNSIGNED NOT NULL,
   PRIMARY KEY(role_id,
   permission_id),
   FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE,
-  FOREIGN KEY(permission_id) REFERENCES permissions(id) ON DELETE CASCADE) ENGINE=InnoDB;
+  FOREIGN KEY(permission_id) REFERENCES permissions(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE accounting_periods(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   year SMALLINT NOT NULL,
@@ -72,7 +72,7 @@ CREATE TABLE accounting_periods(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   year,
   month),
   FOREIGN KEY(company_id) REFERENCES companies(id),
-  FOREIGN KEY(closed_by) REFERENCES users(id)) ENGINE=InnoDB;
+  FOREIGN KEY(closed_by) REFERENCES users(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE accounts(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   code VARCHAR(30) NOT NULL,
@@ -102,7 +102,7 @@ CREATE TABLE accounts(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   FOREIGN KEY(parent_id) REFERENCES accounts(id),
   INDEX idx_account_type(company_id,
   account_type,
-  is_active)) ENGINE=InnoDB;
+  is_active)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE settings(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   setting_key VARCHAR(191) NOT NULL,
@@ -111,7 +111,7 @@ CREATE TABLE settings(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_setting(company_id,
   setting_key),
-  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB;
+  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE number_sequences(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   sequence_key VARCHAR(100) NOT NULL,
@@ -124,7 +124,7 @@ CREATE TABLE number_sequences(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_sequence(company_id,
   sequence_key),
-  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB;
+  FOREIGN KEY(company_id) REFERENCES companies(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE audit_logs(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED,
   user_id BIGINT UNSIGNED NULL,
@@ -142,7 +142,7 @@ CREATE TABLE audit_logs(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   INDEX idx_audit(company_id,
   module,
   action,
-  created_at)) ENGINE=InnoDB;`),
+  created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`),
   down: async (db: { query: (sql: string) => Promise<unknown> }) => {
     for (const t of [
       'audit_logs',

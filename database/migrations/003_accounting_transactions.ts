@@ -31,7 +31,7 @@ CREATE TABLE journals(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   FOREIGN KEY(posted_by) REFERENCES users(id),
   INDEX idx_journal(company_id,
   journal_date,
-  status)) ENGINE=InnoDB;
+  status)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE journal_lines(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   journal_id BIGINT UNSIGNED NOT NULL,
   account_id BIGINT UNSIGNED NOT NULL,
@@ -49,7 +49,7 @@ CREATE TABLE journal_lines(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   FOREIGN KEY(project_id) REFERENCES projects(id),
   CHECK(debit>=0 AND credit>=0),
   CHECK(NOT(debit>0 AND credit>0)),
-  INDEX idx_journal_line_account(account_id)) ENGINE=InnoDB;
+  INDEX idx_journal_line_account(account_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE inventory_balances(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   item_id BIGINT UNSIGNED NOT NULL,
@@ -64,7 +64,7 @@ CREATE TABLE inventory_balances(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   warehouse_id),
   FOREIGN KEY(company_id) REFERENCES companies(id),
   FOREIGN KEY(item_id) REFERENCES items(id),
-  FOREIGN KEY(warehouse_id) REFERENCES warehouses(id)) ENGINE=InnoDB;
+  FOREIGN KEY(warehouse_id) REFERENCES warehouses(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE inventory_movements(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   item_id BIGINT UNSIGNED NOT NULL,
@@ -95,7 +95,7 @@ CREATE TABLE inventory_movements(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   INDEX idx_inventory_card(company_id,
   item_id,
   warehouse_id,
-  movement_date)) ENGINE=InnoDB;
+  movement_date)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE sales_invoices(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   invoice_number VARCHAR(50) NOT NULL,
@@ -139,7 +139,7 @@ CREATE TABLE sales_invoices(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   INDEX idx_sales_invoice(company_id,
   invoice_date,
   status,
-  customer_id)) ENGINE=InnoDB;
+  customer_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE sales_invoice_lines(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   sales_invoice_id BIGINT UNSIGNED NOT NULL,
   item_id BIGINT UNSIGNED NOT NULL,
@@ -161,7 +161,7 @@ CREATE TABLE sales_invoice_lines(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   FOREIGN KEY(sales_invoice_id) REFERENCES sales_invoices(id),
   FOREIGN KEY(item_id) REFERENCES items(id),
   FOREIGN KEY(unit_id) REFERENCES units(id),
-  FOREIGN KEY(tax_code_id) REFERENCES tax_codes(id)) ENGINE=InnoDB;
+  FOREIGN KEY(tax_code_id) REFERENCES tax_codes(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE purchase_invoices(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   company_id BIGINT UNSIGNED NOT NULL,
   invoice_number VARCHAR(50) NOT NULL,
@@ -203,7 +203,7 @@ CREATE TABLE purchase_invoices(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   INDEX idx_purchase_invoice(company_id,
   invoice_date,
   status,
-  supplier_id)) ENGINE=InnoDB;
+  supplier_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE purchase_invoice_lines(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   purchase_invoice_id BIGINT UNSIGNED NOT NULL,
   item_id BIGINT UNSIGNED NOT NULL,
@@ -223,7 +223,7 @@ CREATE TABLE purchase_invoice_lines(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KE
   FOREIGN KEY(purchase_invoice_id) REFERENCES purchase_invoices(id),
   FOREIGN KEY(item_id) REFERENCES items(id),
   FOREIGN KEY(unit_id) REFERENCES units(id),
-  FOREIGN KEY(tax_code_id) REFERENCES tax_codes(id)) ENGINE=InnoDB;`),
+  FOREIGN KEY(tax_code_id) REFERENCES tax_codes(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`),
   down: async (db: { query: (sql: string) => Promise<unknown> }) => {
     for (const t of [
       'purchase_invoice_lines',
