@@ -1,5 +1,5 @@
 import { transaction } from '../config/database'
-import { JournalRepository } from '../repositories/JournalRepository'
+import { JournalRepository, type JournalRow } from '../repositories/JournalRepository'
 import type { QueryExecutor } from '../types/database'
 import { ConflictError, NotFoundError } from '../utils/AppError'
 import type { z } from 'zod'
@@ -48,7 +48,9 @@ export class JournalService {
   }
 
   async create(companyId: number, input: JournalInput, context: PostingContext) {
-    return transaction((connection) => this.createInTransaction(connection, companyId, input, context))
+    return transaction((connection) =>
+      this.createInTransaction(connection, companyId, input, context),
+    )
   }
 
   async createInTransaction(
@@ -96,7 +98,11 @@ export class JournalService {
       if (!['draft', 'rejected'].includes(journal.status)) {
         throw new ConflictError('Hanya jurnal draft atau rejected yang dapat diubah')
       }
-      await this.validation.ensureOpenPeriod(connection, companyId, this.dateOnly(journal.journal_date))
+      await this.validation.ensureOpenPeriod(
+        connection,
+        companyId,
+        this.dateOnly(journal.journal_date),
+      )
       await this.validation.ensureOpenPeriod(connection, companyId, input.journal_date)
       const totals = await this.posting.validateLines(connection, companyId, input.lines)
       await this.repository.updateDraft(connection, id, {
@@ -131,8 +137,13 @@ export class JournalService {
       const journal = await this.repository.findForUpdate(connection, id, companyId)
       if (!journal) throw new NotFoundError('Jurnal tidak ditemukan')
       this.ensureManual(journal.source_type)
-      if (journal.status !== 'draft') throw new ConflictError('Hanya jurnal draft yang dapat dihapus')
-      await this.validation.ensureOpenPeriod(connection, companyId, this.dateOnly(journal.journal_date))
+      if (journal.status !== 'draft')
+        throw new ConflictError('Hanya jurnal draft yang dapat dihapus')
+      await this.validation.ensureOpenPeriod(
+        connection,
+        companyId,
+        this.dateOnly(journal.journal_date),
+      )
       await this.repository.removeDraft(connection, id)
       await this.audit.log(connection, {
         companyId,
@@ -177,15 +188,17 @@ export class JournalService {
       status: 'approved',
       action: 'approve',
       fields: { approved_by: context.userId, approved_at: this.timestamp() },
+      beforeTransition: (connection, journal) =>
+        this.validation.ensureIndependentApprover(
+          connection,
+          companyId,
+          journal.submitted_by,
+          context.userId,
+        ),
     })
   }
 
-  async reject(
-    id: number,
-    companyId: number,
-    comments: string,
-    context: PostingContext,
-  ) {
+  async reject(id: number, companyId: number, comments: string, context: PostingContext) {
     return this.transition(id, companyId, context, {
       allowed: ['pending_approval'],
       status: 'rejected',
@@ -227,6 +240,7 @@ export class JournalService {
       status: string
       action: string
       fields: Record<string, string | number | null>
+      beforeTransition?: (connection: QueryExecutor, journal: JournalRow) => Promise<void>
     },
   ) {
     await transaction((connection) =>
@@ -245,6 +259,7 @@ export class JournalService {
       status: string
       action: string
       fields: Record<string, string | number | null>
+      beforeTransition?: (connection: QueryExecutor, journal: JournalRow) => Promise<void>
     },
   ) {
     const journal = await this.repository.findForUpdate(connection, id, companyId)
@@ -253,7 +268,12 @@ export class JournalService {
     if (!change.allowed.includes(journal.status)) {
       throw new ConflictError(`Jurnal berstatus ${journal.status} tidak dapat ${change.action}`)
     }
-    await this.validation.ensureOpenPeriod(connection, companyId, this.dateOnly(journal.journal_date))
+    await change.beforeTransition?.(connection, journal)
+    await this.validation.ensureOpenPeriod(
+      connection,
+      companyId,
+      this.dateOnly(journal.journal_date),
+    )
     const lines = await this.repository.lines(connection, id)
     assertBalanced(
       lines.map((line) => ({

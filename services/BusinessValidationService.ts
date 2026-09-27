@@ -1,6 +1,13 @@
 import type { RowDataPacket } from 'mysql2'
 import type { QueryExecutor } from '../types/database'
-import { ConflictError, NotFoundError } from '../utils/AppError'
+import { ConflictError, ForbiddenError, NotFoundError } from '../utils/AppError'
+
+export const booleanSettingEnabled = (value: unknown) =>
+  ['1', 'true', 'yes', 'on'].includes(
+    String(value ?? '')
+      .trim()
+      .toLowerCase(),
+  )
 
 const allowedReferenceTables = new Set([
   'accounts',
@@ -25,6 +32,26 @@ export interface ReferenceCheck {
 }
 
 export class BusinessValidationService {
+  async ensureIndependentApprover(
+    connection: QueryExecutor,
+    companyId: number,
+    submittedBy: number | null,
+    approverId: number,
+  ) {
+    if (!submittedBy || submittedBy !== approverId) return
+
+    const [rows] = await connection.execute<RowDataPacket[]>(
+      `SELECT setting_value
+       FROM settings
+       WHERE company_id = ? AND setting_key = 'accounting.allow_self_approval'
+       LIMIT 1`,
+      [companyId],
+    )
+    if (!booleanSettingEnabled(rows[0]?.setting_value)) {
+      throw new ForbiddenError('Pembuat/pengaju jurnal tidak boleh menyetujui jurnal yang sama')
+    }
+  }
+
   async ensureOpenPeriod(connection: QueryExecutor, companyId: number, date: Date | string) {
     const value = date instanceof Date ? date.toISOString().slice(0, 10) : date
     const [rows] = await connection.execute<RowDataPacket[]>(

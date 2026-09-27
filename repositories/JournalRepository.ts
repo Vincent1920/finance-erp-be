@@ -17,6 +17,7 @@ export interface JournalRow extends RowDataPacket {
   currency: string
   exchange_rate: string | number
   version: number
+  submitted_by: number | null
 }
 
 export interface JournalLineRow extends RowDataPacket {
