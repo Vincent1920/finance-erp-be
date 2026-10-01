@@ -9,6 +9,7 @@ import { PurchaseOrderService } from '../../services/PurchaseOrderService'
 import { SalesInvoiceService } from '../../services/SalesInvoiceService'
 import { SalesOrderService } from '../../services/SalesOrderService'
 import { SalesReturnService } from '../../services/SalesReturnService'
+import { TaxReconciliationService } from '../../services/TaxReconciliationService'
 import { hashPassword } from '../../utils/password'
 import { goodsReceiptSchema } from '../../validators/goods-receipt.validator'
 import { journalSchema } from '../../validators/journal.validator'
@@ -862,6 +863,96 @@ async function seedBankStatement(refs: Awaited<ReturnType<typeof lookups>>) {
   })
 }
 
+async function seedFixedAssets(refs: Awaited<ReturnType<typeof lookups>>) {
+  await transaction(async (connection) => {
+    await connection.execute(
+      `INSERT INTO fixed_asset_categories(
+        company_id,code,name,description,default_useful_life_months,
+        asset_account_id,accumulated_depreciation_account_id,depreciation_expense_account_id,is_active
+       ) VALUES(?,?,?,?,?,?,?,?,TRUE)
+       ON DUPLICATE KEY UPDATE name=VALUES(name),description=VALUES(description),
+        default_useful_life_months=VALUES(default_useful_life_months),asset_account_id=VALUES(asset_account_id),
+        accumulated_depreciation_account_id=VALUES(accumulated_depreciation_account_id),
+        depreciation_expense_account_id=VALUES(depreciation_expense_account_id),is_active=TRUE`,
+      [COMPANY_ID, 'FA-DEMO-EQUIPMENT', 'Peralatan Kantor & TI', 'Kategori aset demo untuk perangkat kantor dan teknologi', 48, refs.accounts['1201'], refs.accounts['1202'], refs.accounts['6107']],
+    )
+    const [categories] = await connection.execute<RowDataPacket[]>(
+      `SELECT id FROM fixed_asset_categories WHERE company_id=? AND code='FA-DEMO-EQUIPMENT' LIMIT 1`,
+      [COMPANY_ID],
+    )
+    const categoryId = Number(categories[0]!.id)
+    const assets = [
+      ['FA-DEMO-001', 'Server Operasional Utama', '2026-01-01', '2026-01-01', 18_000_000, 0, 48, 'Ruang Server Jakarta', 'SRV-DEMO-2026-001'],
+      ['FA-DEMO-002', 'Paket Laptop Tim Keuangan', '2026-01-01', '2026-01-01', 12_000_000, 0, 36, 'Head Office - Finance', 'LTP-DEMO-FIN-001'],
+      ['FA-DEMO-003', 'Meja dan Kursi Ruang Kerja', '2026-01-01', '2026-01-01', 8_000_000, 500_000, 60, 'Head Office', 'FUR-DEMO-HO-001'],
+      ['FA-DEMO-004', 'AC Ruang Operasional', '2026-01-01', '2026-01-01', 7_000_000, 0, 48, 'Gudang Utama', 'AC-DEMO-WH-001'],
+      ['FA-DEMO-005', 'Printer Multifungsi', '2026-01-01', '2026-01-01', 5_000_000, 250_000, 48, 'Head Office - Finance', 'PRN-DEMO-001'],
+    ] as const
+    for (const asset of assets) {
+      await connection.execute(
+        `INSERT INTO fixed_assets(
+          company_id,asset_code,asset_name,category_id,purchase_date,in_service_date,purchase_cost,
+          salvage_value,useful_life_months,depreciation_method,asset_account_id,
+          accumulated_depreciation_account_id,depreciation_expense_account_id,accumulated_depreciation,
+          book_value,location,serial_number,reference,notes,status,created_by
+        ) VALUES(?,?,?,?,?,?,?,?,?,'straight_line',?,?,?,0,?,?,?,?,?,'active',?)
+        ON DUPLICATE KEY UPDATE asset_name=VALUES(asset_name),category_id=VALUES(category_id),
+          purchase_date=VALUES(purchase_date),in_service_date=VALUES(in_service_date),purchase_cost=VALUES(purchase_cost),
+          salvage_value=VALUES(salvage_value),useful_life_months=VALUES(useful_life_months),
+          asset_account_id=VALUES(asset_account_id),accumulated_depreciation_account_id=VALUES(accumulated_depreciation_account_id),
+          depreciation_expense_account_id=VALUES(depreciation_expense_account_id),book_value=VALUES(book_value),
+          location=VALUES(location),serial_number=VALUES(serial_number),reference=VALUES(reference),notes=VALUES(notes),
+          status='active',deleted_at=NULL`,
+        [COMPANY_ID, asset[0], asset[1], categoryId, asset[2], asset[3], asset[4], asset[5], asset[6], refs.accounts['1201'], refs.accounts['1202'], refs.accounts['6107'], asset[4], asset[7], asset[8], 'OPEN-DEMO-GL-2026', 'Terdaftar dari saldo awal aset; jurnal perolehan tidak dibuat ulang.', actor.userId],
+      )
+    }
+  })
+}
+
+async function seedTaxReconciliationDemo() {
+  const service = new TaxReconciliationService()
+  await service.importInternal(COMPANY_ID, {
+    period: '2026-09', revision: 0, source_file: 'contoh-data-internal-pajak-september-2026.csv',
+    notes: 'Contoh payroll, honorarium, dan objek PPh Unifikasi untuk demonstrasi.',
+    rows: [
+      { tax_type: 'pph21_employee', document_number: 'BP21-DEMO-0001', document_date: '2026-09-30', counterparty_tax_number: '3173010101010001', counterparty_name: 'Andi Pratama', tax_code: '21-100-01', dpp: 12_000_000, tax_amount: 600_000, description: 'Gaji pegawai September' },
+      { tax_type: 'pph21_employee', document_number: 'BP21-DEMO-0002', document_date: '2026-09-30', counterparty_tax_number: '3173020202020002', counterparty_name: 'Sari Wulandari', tax_code: '21-100-01', dpp: 10_000_000, tax_amount: 450_000, description: 'Gaji pegawai September' },
+      { tax_type: 'pph21_non_employee', document_number: 'BP21-DEMO-0003', document_date: '2026-09-25', counterparty_tax_number: '3173030303030003', counterparty_name: 'Dimas Konsultan', tax_code: '21-100-09', dpp: 5_000_000, tax_amount: 250_000, description: 'Honorarium tenaga ahli' },
+      { tax_type: 'pph23', document_number: 'BPU-DEMO-230001', document_date: '2026-09-20', counterparty_tax_number: '0123456789012345', counterparty_name: 'PT Jasa Profesional', tax_code: '24-104-18', dpp: 15_000_000, tax_amount: 300_000, description: 'Jasa profesional PPh 23' },
+      { tax_type: 'pph42', document_number: 'BPU-DEMO-420001', document_date: '2026-09-10', counterparty_tax_number: '0987654321098765', counterparty_name: 'PT Properti Nusantara', tax_code: '28-403-01', dpp: 20_000_000, tax_amount: 2_000_000, description: 'Sewa tanah/bangunan PPh 4(2)' },
+    ],
+  }, actor)
+  const beforeLinks: any = await service.overview(COMPANY_ID, '2026-09', 'all')
+  const automatic = beforeLinks.rows.filter((row: any) => row.source_key && !row.source_key.startsWith('INTERNAL-'))
+  for (const [index, row] of automatic.entries()) {
+    const prefix = row.tax_group === 'ppn' ? 'FP' : 'BPU'
+    await service.linkDocument(COMPANY_ID, {
+      source_key: row.source_key,
+      tax_document_number: `${prefix}-DEMO-202609-${String(index + 1).padStart(4, '0')}`,
+      tax_document_date: row.document_date,
+      notes: 'Nomor dokumen pajak contoh untuk demonstrasi rekonsiliasi.',
+    }, actor)
+  }
+  const system: any = await service.overview(COMPANY_ID, '2026-09', 'all')
+  const rows = system.rows.slice(0, -1).map((row: any) => ({
+    tax_type: row.tax_type,
+    document_number: row.document_number,
+    document_date: row.document_date,
+    counterparty_tax_number: row.counterparty_tax_number || null,
+    counterparty_name: row.counterparty_name || null,
+    tax_code: row.tax_code || null,
+    dpp: row.system_dpp,
+    tax_amount: row.system_tax,
+    description: 'Contoh hasil ekspor Coretax',
+  }))
+  if (rows[1]) rows[1].tax_amount = Number(rows[1].tax_amount) + 55_000
+  rows.push({ tax_type: 'pph23', document_number: 'BPU-SPT-ONLY-0001', document_date: '2026-09-28', counterparty_tax_number: '0111222233334444', counterparty_name: 'PT Dokumen Belum Tercatat', tax_code: '24-104-18', dpp: 7_500_000, tax_amount: 150_000, description: 'Contoh dokumen hanya terdapat pada SPT' })
+  await service.importReport(COMPANY_ID, {
+    period: '2026-09', revision: 0, source_file: 'contoh-ekspor-coretax-september-2026.csv',
+    notes: 'Data demonstrasi: sesuai, beda nilai, hanya di Finora, dan hanya di SPT.', rows,
+  }, actor)
+}
+
 export interface DemoVerification {
   counts: Record<string, number>
   postedDebit: number
@@ -922,6 +1013,8 @@ export async function verifyDemoData(): Promise<DemoVerification> {
       "SELECT COUNT(*) total FROM journals WHERE company_id=1 AND reference LIKE 'JRN-DEMO-%'",
     InventoryMovements:
       "SELECT COUNT(*) total FROM inventory_movements WHERE company_id=1 AND (reference LIKE '%DEMO%' OR transaction_number LIKE '%DEMO%')",
+    FixedAssets: "SELECT COUNT(*) total FROM fixed_assets WHERE company_id=1 AND asset_code LIKE 'FA-DEMO-%'",
+    TaxReportRows: "SELECT COUNT(*) total FROM tax_report_rows r JOIN tax_reconciliation_periods p ON p.id=r.period_id WHERE r.company_id=1 AND p.tax_period='2026-09'",
   }
   const counts: Record<string, number> = {}
   for (const [label, sql] of Object.entries(countQueries)) {
@@ -953,6 +1046,8 @@ export async function verifyDemoData(): Promise<DemoVerification> {
     GoodsReceipts: 3,
     Journals: 10,
     InventoryMovements: 40,
+    FixedAssets: 5,
+    TaxReportRows: 1,
   }
   for (const [label, minimum] of Object.entries(minimums)) {
     if ((counts[label] ?? 0) < minimum)
@@ -968,11 +1063,17 @@ export async function verifyDemoData(): Promise<DemoVerification> {
     [COMPANY_ID],
   )
   const [ar] = await db.execute<RowDataPacket[]>(
-    `SELECT COUNT(*) total FROM sales_invoices WHERE company_id=? AND ABS(outstanding_amount-(grand_total-paid_amount))>0.01`,
+    `SELECT COUNT(*) total FROM sales_invoices i
+     WHERE i.company_id=?
+       AND NOT EXISTS(SELECT 1 FROM sales_returns r WHERE r.sales_invoice_id=i.id AND r.status='posted')
+       AND ABS(i.outstanding_amount-(i.grand_total-i.paid_amount))>0.01`,
     [COMPANY_ID],
   )
   const [ap] = await db.execute<RowDataPacket[]>(
-    `SELECT COUNT(*) total FROM purchase_invoices WHERE company_id=? AND ABS(outstanding_amount-(grand_total-paid_amount))>0.01`,
+    `SELECT COUNT(*) total FROM purchase_invoices i
+     WHERE i.company_id=?
+       AND NOT EXISTS(SELECT 1 FROM purchase_returns r WHERE r.purchase_invoice_id=i.id AND r.status='posted')
+       AND ABS(i.outstanding_amount-(i.grand_total-i.paid_amount))>0.01`,
     [COMPANY_ID],
   )
   const [tables] = await db.execute<RowDataPacket[]>(
@@ -1065,6 +1166,8 @@ export async function runDemoSeed(options: { printSummary?: boolean } = {}) {
   await seedSalesReturns()
   await seedJournals(refs)
   await seedBankStatement(refs)
+  await seedFixedAssets(refs)
+  await seedTaxReconciliationDemo()
   const result = await verifyDemoData()
   if (options.printSummary !== false) {
     printSummary(result)

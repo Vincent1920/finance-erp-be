@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { nonnegativeQuantitySchema } from './common.validator'
 
 const nullableId = z.coerce.number().int().positive().nullable().optional()
 const active = z.boolean().default(true)
@@ -28,7 +29,10 @@ export const customerSchema = z.object({
     .length(3)
     .transform((value) => value.toUpperCase())
     .default('IDR'),
-  tax_number: z.string().trim().max(50).nullable().optional(),
+  tax_number: z
+    .string()
+    .trim()
+    .regex(/^\d{16}$/, 'NPWP wajib tepat 16 digit angka'),
   email: z.email().nullable().optional(),
   phone: z.string().trim().max(50).nullable().optional(),
   address: z.string().trim().max(5000).nullable().optional(),
@@ -77,6 +81,8 @@ export const itemSchema = z.object({
   description: z.string().trim().max(5000).nullable().optional(),
   item_type: z.enum(['inventory', 'service', 'non_inventory']),
   unit_id: z.coerce.number().int().positive(),
+  smallest_unit_id: nullableId,
+  smallest_unit_factor: z.coerce.number().int().min(1).max(1000000).default(1),
   sales_account_id: nullableId,
   inventory_account_id: nullableId,
   cogs_account_id: nullableId,
@@ -84,7 +90,7 @@ export const itemSchema = z.object({
   sales_price: z.coerce.number().nonnegative().default(0),
   purchase_price: z.coerce.number().nonnegative().default(0),
   average_cost: z.coerce.number().nonnegative().default(0),
-  minimum_stock: z.coerce.number().nonnegative().default(0),
+  minimum_stock: nonnegativeQuantitySchema.default('0.0000'),
   is_active: active,
 })
 
@@ -106,10 +112,18 @@ export const taxCodeSchema = z.object({
   code: code.max(30),
   name: name.max(100),
   tax_type: z.enum(['vat', 'withholding', 'other']),
+  reporting_type: z.enum(['ppn', 'pph21_employee', 'pph21_non_employee', 'pph23', 'pph42', 'other']).nullable().optional(),
   rate: z.coerce.number().min(0).max(100),
   input_tax_account_id: nullableId,
   output_tax_account_id: nullableId,
   is_active: active,
+}).superRefine((value, context) => {
+  if (value.tax_type === 'vat' && value.reporting_type && !['ppn', 'other'].includes(value.reporting_type)) {
+    context.addIssue({ code: 'custom', path: ['reporting_type'], message: 'Kode PPN harus masuk kelompok pelaporan PPN' })
+  }
+  if (value.tax_type === 'withholding' && value.reporting_type === 'ppn') {
+    context.addIssue({ code: 'custom', path: ['reporting_type'], message: 'Pajak potong harus masuk kelompok PPh' })
+  }
 })
 
 export const costCenterSchema = z.object({

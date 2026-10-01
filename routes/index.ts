@@ -19,6 +19,7 @@ import {
 } from '../validators/entity.validator'
 
 import auth from './auth.routes'
+import operations from './operations.routes'
 import { entityRoutes } from './entity.routes'
 import inventory from './inventory.routes'
 import imports from './imports.routes'
@@ -31,6 +32,11 @@ import purchases from './purchase.routes'
 import settings from './settings.routes'
 import users from './users.routes'
 import { auditLogs, errorLogs } from './logs.routes'
+import payroll from './payroll.routes'
+import periodClosing from './period-closing.routes'
+import yearEnd from './year-end.routes'
+import recurringJournals from './recurring-journal.routes'
+import monthEnd from './month-end.routes'
 
 const route = new Hono()
 const dashboard = new DashboardController()
@@ -38,6 +44,8 @@ const search = new SearchController()
 
 route.get('/health', dashboard.health)
 route.route('/auth', auth)
+route.use('/operations/*', authMiddleware)
+route.route('/operations', operations)
 
 route.use('/dashboard/*', authMiddleware)
 route.get('/dashboard/summary', requirePermission('dashboard.view'), dashboard.summary)
@@ -85,6 +93,9 @@ route.route('/bank-accounts', entityRoutes('bank_accounts', 'bank-accounts', ban
 route.use('/journals/*', authMiddleware)
 route.route('/journals', journals)
 
+route.use('/recurring-journals/*', authMiddleware)
+route.route('/recurring-journals', recurringJournals)
+
 route.use('/inventory/*', authMiddleware)
 route.route('/inventory', inventory)
 
@@ -98,6 +109,18 @@ route.route('/purchases', purchases)
 
 route.use('/reports/*', authMiddleware)
 route.route('/reports', reports)
+
+route.use('/payroll/*', authMiddleware)
+route.route('/payroll', payroll)
+
+route.use('/period-closing/*', authMiddleware)
+route.route('/period-closing', periodClosing)
+
+route.use('/month-end/*', authMiddleware)
+route.route('/month-end', monthEnd)
+
+route.use('/year-end/*', authMiddleware)
+route.route('/year-end', yearEnd)
 
 route.use('/users/*', authMiddleware)
 route.route('/users', users)

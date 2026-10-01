@@ -4,6 +4,7 @@ import {
   BusinessValidationService,
   booleanSettingEnabled,
 } from '../services/BusinessValidationService'
+import { journalListQuerySchema } from '../validators/journal.validator'
 describe('accounting integrity', () => {
   test('balanced journal accepted', () =>
     expect(() =>
@@ -50,5 +51,13 @@ describe('accounting integrity', () => {
     await expect(
       validation.ensureIndependentApprover(enabledConnection, 1, 9, 9),
     ).resolves.toBeUndefined()
+  })
+
+  test('journal sorting only accepts server-approved columns and directions', () => {
+    expect(journalListQuerySchema.parse({ sort: 'total_debit', order: 'asc' })).toMatchObject({
+      sort: 'total_debit',
+      order: 'asc',
+    })
+    expect(() => journalListQuerySchema.parse({ sort: 'j.id DESC; DROP TABLE journals' })).toThrow()
   })
 })

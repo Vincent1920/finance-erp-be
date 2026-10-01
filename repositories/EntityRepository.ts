@@ -157,6 +157,7 @@ const dependencies: Partial<Record<EntityTable, Array<[string, string]>>> = {
   ],
   units: [
     ['items', 'unit_id'],
+    ['items', 'smallest_unit_id'],
     ['sales_order_lines', 'unit_id'],
     ['sales_invoice_lines', 'unit_id'],
     ['purchase_order_lines', 'unit_id'],

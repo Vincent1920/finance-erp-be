@@ -27,7 +27,8 @@ export class InventoryService {
   card(
     companyId: number,
     query: {
-      item_id: number
+      item_id?: number
+      item_ids?: number[]
       warehouse_id?: number
       date_from: string
       date_to: string
@@ -37,6 +38,7 @@ export class InventoryService {
   ) {
     return this.repository.card(companyId, {
       itemId: query.item_id,
+      itemIds: query.item_ids,
       warehouseId: query.warehouse_id,
       dateFrom: query.date_from,
       dateTo: query.date_to,

@@ -58,12 +58,30 @@ export class BusinessValidationService {
       `SELECT id, year, month, start_date, end_date, status
        FROM accounting_periods
        WHERE company_id = ? AND ? BETWEEN start_date AND end_date
-       LIMIT 1`,
+       LIMIT 1
+       FOR SHARE`,
       [companyId, value],
     )
     const period = rows[0]
     if (!period) throw new ConflictError('Periode akuntansi untuk tanggal tersebut belum dibuat')
     if (period.status !== 'open') throw new ConflictError('Periode akuntansi tidak terbuka')
+    return period
+  }
+
+  async ensureClosedPeriod(connection: QueryExecutor, companyId: number, date: Date | string) {
+    const value = date instanceof Date ? date.toISOString().slice(0, 10) : date
+    const [rows] = await connection.execute<RowDataPacket[]>(
+      `SELECT id,year,month,start_date,end_date,status
+       FROM accounting_periods
+       WHERE company_id=? AND ? BETWEEN start_date AND end_date
+       LIMIT 1
+       FOR SHARE`,
+      [companyId, value],
+    )
+    const period = rows[0]
+    if (!period) throw new ConflictError('Periode akuntansi untuk tanggal tersebut belum dibuat')
+    if (period.status !== 'closed')
+      throw new ConflictError('Jurnal tutup tahun hanya dapat diposting pada periode yang sudah ditutup permanen')
     return period
   }
 

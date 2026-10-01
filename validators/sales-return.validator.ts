@@ -1,21 +1,28 @@
 import { z } from 'zod'
 import { isoDateSchema, positiveIdSchema, quantitySchema } from './common.validator'
-export const salesReturnSchema = z.object({
-  return_date: isoDateSchema,
-  sales_invoice_id: positiveIdSchema,
-  reference: z.string().trim().max(100).nullable().optional(),
-  reason: z.string().trim().min(3).max(5000),
-  lines: z
-    .array(
-      z.object({
-        sales_invoice_line_id: positiveIdSchema,
-        quantity: quantitySchema,
-        reason: z.string().trim().max(255).nullable().optional(),
-      }),
-    )
-    .min(1)
-    .max(500),
-})
+export const salesReturnSchema = z
+  .object({
+    return_date: isoDateSchema,
+    sales_invoice_id: positiveIdSchema,
+    return_stock: z.boolean().default(true),
+    reference: z.string().trim().max(100).nullable().optional(),
+    reason: z.string().trim().min(3).max(5000),
+    lines: z
+      .array(
+        z.object({
+          sales_invoice_line_id: positiveIdSchema,
+          quantity: quantitySchema,
+          reason: z.string().trim().max(255).nullable().optional(),
+        }),
+      )
+      .min(1)
+      .max(500),
+  })
+  .refine(
+    (value) =>
+      new Set(value.lines.map((line) => line.sales_invoice_line_id)).size === value.lines.length,
+    'Baris invoice retur tidak boleh duplikat',
+  )
 export const salesReturnListSchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),

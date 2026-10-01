@@ -1,4 +1,8 @@
-import { ReportRepository, type DateRange, type LedgerFilters } from '../repositories/ReportRepository'
+import {
+  ReportRepository,
+  type DateRange,
+  type LedgerFilters,
+} from '../repositories/ReportRepository'
 import {
   addDecimal,
   compareDecimal,
@@ -11,13 +15,48 @@ import {
 type ReportRow = Record<string, unknown>
 
 const money = (value: unknown) => String(value ?? '0')
-const signedDebit = (row: ReportRow) =>
-  subtractDecimal(money(row.debit), money(row.credit))
-const signedCredit = (row: ReportRow) =>
-  subtractDecimal(money(row.credit), money(row.debit))
+const signedDebit = (row: ReportRow) => subtractDecimal(money(row.debit), money(row.credit))
+const signedCredit = (row: ReportRow) => subtractDecimal(money(row.credit), money(row.debit))
 
 function total(values: Array<string | number>) {
   return fromScaledInteger(sumScaled(values))
+}
+
+export function fiscalYearStartDate(asOfDate: string, fiscalYearStart: number) {
+  const [yearPart, monthPart] = asOfDate.split('-').map(Number)
+  const month = Math.min(12, Math.max(1, Number(fiscalYearStart) || 1))
+  const year = monthPart < month ? yearPart - 1 : yearPart
+  return `${year}-${String(month).padStart(2, '0')}-01`
+}
+
+const normalizedReportGroup = (value: unknown) =>
+  String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
+
+const isExplicitIncomeTaxGroup = (value: unknown) => {
+  const group = normalizedReportGroup(value)
+  return [
+    'tax',
+    'income_tax',
+    'income_tax_expense',
+    'beban_pajak',
+    'beban_pajak_penghasilan',
+    'pajak_penghasilan',
+  ].includes(group)
+}
+
+const earningsFromMovements = (rows: ReportRow[]) => {
+  const earnings = rows.reduce((sum, row) => {
+    const accountType = String(row.account_type)
+    if (['revenue', 'other_income'].includes(accountType))
+      return sum + toScaledInteger(signedCredit(row))
+    if (['cogs', 'expense', 'other_expense'].includes(accountType))
+      return sum - toScaledInteger(signedDebit(row))
+    return sum
+  }, 0n)
+  return fromScaledInteger(earnings)
 }
 
 export class ReportingService {
@@ -74,16 +113,22 @@ export class ReportingService {
         code: String(row.code),
         name: String(row.name),
         accountType,
+        reportGroup: row.report_group ? String(row.report_group) : null,
         amount,
       }
     })
-    const section = (types: string[]) => accountRows.filter((row) => types.includes(row.accountType))
+    const section = (types: string[]) =>
+      accountRows.filter((row) => types.includes(row.accountType))
     const revenue = section(['revenue'])
     const cogs = section(['cogs'])
     const otherIncome = section(['other_income'])
     const otherExpense = section(['other_expense'])
     const expenseRows = section(['expense'])
-    const tax = expenseRows.filter((row) => /pajak|tax/i.test(row.name))
+    const explicitlyClassifiedTax = expenseRows.filter((row) =>
+      isExplicitIncomeTaxGroup(row.reportGroup),
+    )
+    const legacyTax = expenseRows.filter((row) => !row.reportGroup && /pajak|tax/i.test(row.name))
+    const tax = [...explicitlyClassifiedTax, ...legacyTax]
     const operatingExpenses = expenseRows.filter((row) => !tax.includes(row))
     const revenueTotal = total(revenue.map((row) => row.amount))
     const cogsTotal = total(cogs.map((row) => row.amount))
@@ -92,11 +137,7 @@ export class ReportingService {
     const operatingProfit = subtractDecimal(grossProfit, operatingExpenseTotal)
     const otherIncomeTotal = total(otherIncome.map((row) => row.amount))
     const otherExpenseTotal = total(otherExpense.map((row) => row.amount))
-    const profitBeforeTax = addDecimal([
-      operatingProfit,
-      otherIncomeTotal,
-      `-${otherExpenseTotal}`,
-    ])
+    const profitBeforeTax = addDecimal([operatingProfit, otherIncomeTotal, `-${otherExpenseTotal}`])
     const taxTotal = total(tax.map((row) => row.amount))
     const netProfit = subtractDecimal(profitBeforeTax, taxTotal)
 
@@ -114,12 +155,30 @@ export class ReportingService {
       operatingProfit,
       profitBeforeTax,
       netProfit,
+      classificationWarnings: legacyTax.map((row) => ({
+        accountId: row.accountId,
+        code: row.code,
+        name: row.name,
+        message:
+          'Diklasifikasikan dari nama akun. Isi Kelompok Laporan agar klasifikasi tetap konsisten.',
+      })),
     }
   }
 
   async balanceSheet(companyId: number, asOfDate: string) {
-    const rows = (await this.repository.accountBalancesAsOf(companyId, asOfDate)) as ReportRow[]
-    const mapped = rows.map((row) => {
+    const [rows, companySettings] = await Promise.all([
+      this.repository.accountBalancesAsOf(companyId, asOfDate),
+      this.repository.companyReportingSettings(companyId),
+    ])
+    const fiscalYearStart = fiscalYearStartDate(
+      asOfDate,
+      Number(companySettings.fiscal_year_start ?? 1),
+    )
+    const currentPeriodRows = (await this.repository.accountMovements(companyId, {
+      dateFrom: fiscalYearStart,
+      dateTo: asOfDate,
+    })) as ReportRow[]
+    const mapped = (rows as ReportRow[]).map((row) => {
       const accountType = String(row.account_type)
       const amount = accountType === 'asset' ? signedDebit(row) : signedCredit(row)
       return {
@@ -133,27 +192,29 @@ export class ReportingService {
     const assets = mapped.filter((row) => row.accountType === 'asset')
     const liabilities = mapped.filter((row) => row.accountType === 'liability')
     const equity = mapped.filter((row) => row.accountType === 'equity')
-    const profitAccounts = mapped.filter((row) =>
-      ['revenue', 'other_income', 'cogs', 'expense', 'other_expense'].includes(row.accountType),
-    )
-    const currentEarningsMinor = profitAccounts.reduce((sum, row) => {
-      const value = toScaledInteger(row.amount)
-      return ['revenue', 'other_income'].includes(row.accountType) ? sum + value : sum - value
-    }, 0n)
-    const currentYearEarnings = fromScaledInteger(currentEarningsMinor)
+    const cumulativeEarnings = earningsFromMovements(rows as ReportRow[])
+    const currentYearEarnings = earningsFromMovements(currentPeriodRows)
+    const unclosedPriorEarnings = subtractDecimal(cumulativeEarnings, currentYearEarnings)
     const assetTotal = total(assets.map((row) => row.amount))
     const liabilityTotal = total(liabilities.map((row) => row.amount))
     const equityAccountTotal = total(equity.map((row) => row.amount))
-    const equityTotal = addDecimal([equityAccountTotal, currentYearEarnings])
+    const equityTotal = addDecimal([equityAccountTotal, unclosedPriorEarnings, currentYearEarnings])
     const liabilitiesAndEquity = addDecimal([liabilityTotal, equityTotal])
     const difference = subtractDecimal(assetTotal, liabilitiesAndEquity)
 
     return {
       asOfDate,
+      fiscalPeriod: { dateFrom: fiscalYearStart, dateTo: asOfDate },
       sections: {
         assets: { accounts: assets, total: assetTotal },
         liabilities: { accounts: liabilities, total: liabilityTotal },
-        equity: { accounts: equity, accountTotal: equityAccountTotal, currentYearEarnings, total: equityTotal },
+        equity: {
+          accounts: equity,
+          accountTotal: equityAccountTotal,
+          unclosedPriorEarnings,
+          currentYearEarnings,
+          total: equityTotal,
+        },
       },
       assets: assetTotal,
       liabilities: liabilityTotal,
@@ -179,7 +240,7 @@ export class ReportingService {
 
     return {
       range,
-      method: 'cash-account-classification',
+      method: 'cash-account-and-offset-account-classification',
       activities: { operating, investing, financing },
       openingBalance,
       netChange,
@@ -218,6 +279,9 @@ export class ReportingService {
       const difference = subtractDecimal(subledger, generalLedger)
       return {
         type: String(row.reconciliation_type),
+        accountId: Number(row.account_id),
+        accountCode: String(row.account_code),
+        accountName: String(row.account_name),
         subledger,
         generalLedger,
         difference,

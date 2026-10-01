@@ -45,6 +45,6 @@ describe('sales return validation', () => {
       }],
     )
     expect(calls[1]?.sql.match(/\?/g)?.length).toBe(calls[1]?.values.length)
-    expect(calls[1]?.values).toHaveLength(16)
+    expect(calls[1]?.values).toHaveLength(17)
   })
 })

@@ -70,6 +70,8 @@ export class JournalRepository {
       dateFrom?: string
       dateTo?: string
       sourceType?: string
+      sort?: string
+      order?: 'asc' | 'desc'
     },
   ) {
     const { page, limit, offset } = pagination(query.page, query.limit)
@@ -97,6 +99,16 @@ export class JournalRepository {
       values.push(query.sourceType)
     }
     const where = conditions.join(' AND ')
+    const sortColumns: Record<string, string> = {
+      journal_number: 'j.journal_number',
+      journal_date: 'j.journal_date',
+      description: 'j.description',
+      source_type: 'j.source_type',
+      total_debit: 'j.total_debit',
+      status: 'j.status',
+    }
+    const sortColumn = sortColumns[query.sort ?? 'journal_date'] ?? 'j.journal_date'
+    const sortOrder = query.order === 'asc' ? 'ASC' : 'DESC'
     const [rows] = await db.query<RowDataPacket[]>(
       `SELECT
          j.*,
@@ -108,7 +120,7 @@ export class JournalRepository {
        LEFT JOIN users approver ON approver.id = j.approved_by
        LEFT JOIN users poster ON poster.id = j.posted_by
        WHERE ${where}
-       ORDER BY j.journal_date DESC, j.id DESC
+       ORDER BY ${sortColumn} ${sortOrder}, j.id DESC
        LIMIT ? OFFSET ?`,
       [...values, limit, offset],
     )

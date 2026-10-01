@@ -5,6 +5,7 @@ import {
   listQuerySchema,
   positiveIdSchema,
   quantitySchema,
+  nonnegativeQuantitySchema,
 } from './common.validator'
 
 export const stockOverviewQuerySchema = listQuerySchema.extend({
@@ -15,7 +16,16 @@ export const stockOverviewQuerySchema = listQuerySchema.extend({
 
 export const inventoryCardQuerySchema = z
   .object({
-    item_id: positiveIdSchema,
+    item_id: positiveIdSchema.optional(),
+    item_ids: z
+      .string()
+      .trim()
+      .regex(/^\d+(,\d+)*$/, 'item_ids harus berisi ID dipisahkan koma')
+      .transform((value) => [...new Set(value.split(',').map(Number))])
+      .refine((value) => value.length <= 100 && value.every((id) => id > 0), {
+        message: 'Maksimal 100 barang dapat dipilih',
+      })
+      .optional(),
     warehouse_id: positiveIdSchema.optional(),
     date_from: isoDateSchema,
     date_to: isoDateSchema,
@@ -51,7 +61,7 @@ export const stockTransferSchema = z
 export const adjustmentLineSchema = z.object({
   item_id: positiveIdSchema,
   unit_id: positiveIdSchema,
-  actual_quantity: z.union([z.string(), z.number()]),
+  actual_quantity: nonnegativeQuantitySchema,
   gain_loss_account_id: positiveIdSchema.optional(),
   reason: z.string().trim().max(500).optional(),
 })

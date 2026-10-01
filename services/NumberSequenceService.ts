@@ -12,19 +12,24 @@ interface SequenceRow extends RowDataPacket {
 }
 
 const defaultSequences: Record<string, { prefix: string; padding: number }> = {
-  sales_order: { prefix: 'SO-{YYYY}-', padding: 6 },
-  sales_invoice: { prefix: 'SI-{YYYY}-', padding: 6 },
-  sales_return: { prefix: 'SR-{YYYY}-', padding: 6 },
-  customer_payment: { prefix: 'CR-{YYYY}-', padding: 6 },
-  purchase_order: { prefix: 'PO-{YYYY}-', padding: 6 },
-  goods_receipt: { prefix: 'GR-{YYYY}-', padding: 6 },
-  purchase_invoice: { prefix: 'PI-{YYYY}-', padding: 6 },
-  purchase_return: { prefix: 'PR-{YYYY}-', padding: 6 },
-  supplier_payment: { prefix: 'CP-{YYYY}-', padding: 6 },
-  journal: { prefix: 'JV-{YYYY}-', padding: 6 },
-  stock_transfer: { prefix: 'ST-{YYYY}-', padding: 6 },
-  stock_adjustment: { prefix: 'SA-{YYYY}-', padding: 6 },
-  backup: { prefix: 'BKP-{YYYY}-', padding: 6 },
+  sales_order: { prefix: 'SO-{YYYY}-{MM}-', padding: 6 },
+  sales_invoice: { prefix: 'SI-{YYYY}-{MM}-', padding: 6 },
+  sales_return: { prefix: 'SR-{YYYY}-{MM}-', padding: 6 },
+  customer_payment: { prefix: 'CR-{YYYY}-{MM}-', padding: 6 },
+  purchase_order: { prefix: 'PO-{YYYY}-{MM}-', padding: 6 },
+  goods_receipt: { prefix: 'GR-{YYYY}-{MM}-', padding: 6 },
+  purchase_invoice: { prefix: 'PI-{YYYY}-{MM}-', padding: 6 },
+  purchase_return: { prefix: 'PR-{YYYY}-{MM}-', padding: 6 },
+  supplier_payment: { prefix: 'CP-{YYYY}-{MM}-', padding: 6 },
+  journal: { prefix: 'JV-{YYYY}-{MM}-', padding: 6 },
+  recurring_journal: { prefix: 'RJ-{YYYY}-{MM}-', padding: 6 },
+  stock_transfer: { prefix: 'ST-{YYYY}-{MM}-', padding: 6 },
+  stock_adjustment: { prefix: 'SA-{YYYY}-{MM}-', padding: 6 },
+  backup: { prefix: 'BKP-{YYYY}-{MM}-', padding: 6 },
+  customer_credit: { prefix: 'CC-{YYYY}-{MM}-', padding: 6 },
+  supplier_credit: { prefix: 'SC-{YYYY}-{MM}-', padding: 6 },
+  customer_refund: { prefix: 'RC-{YYYY}-{MM}-', padding: 6 },
+  supplier_refund: { prefix: 'RS-{YYYY}-{MM}-', padding: 6 },
 }
 
 function normalizedDate(input: Date | string) {
@@ -85,7 +90,11 @@ export class NumberSequenceService {
       [nextNumber, resetKey, sequence.id],
     )
 
-    const prefix = sequence.prefix
+    const pattern =
+      sequence.prefix.includes('{YYYY}') && !sequence.prefix.includes('{MM}')
+        ? sequence.prefix.replace('{YYYY}', '{YYYY}-{MM}')
+        : sequence.prefix
+    const prefix = pattern
       .replaceAll('{YYYY}', year)
       .replaceAll('{YY}', year.slice(-2))
       .replaceAll('{MM}', month)

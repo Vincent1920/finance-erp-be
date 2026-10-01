@@ -14,7 +14,22 @@ describe('HTTP smoke tests', () => {
     expect(response.status).toBe(401)
   })
   for (const endpoint of [
+    '/api/operations/tax-reconciliation?period=2026-09&scope=all',
+    '/api/operations/assets',
+    '/api/operations/budgets',
+    '/api/operations/cash-book',
+    '/api/operations/bank-statements',
+    '/api/operations/purchase-returns',
+    '/api/operations/stock-transfers',
+    '/api/operations/stock-adjustments',
+    '/api/operations/print-template',
+    '/api/operations/receivable-settlements',
+    '/api/operations/payable-settlements',
     '/api/accounting-periods',
+    '/api/period-closing?year=2026',
+    '/api/year-end',
+    '/api/recurring-journals',
+    '/api/month-end?as_of_date=2026-09-30',
     '/api/warehouses',
     '/api/units',
     '/api/tax-codes',
@@ -40,6 +55,15 @@ describe('HTTP smoke tests', () => {
   ]) {
     test(`${endpoint} is registered and protected`, async () => {
       const response = await app.request(endpoint)
+      expect(response.status).toBe(401)
+    })
+  }
+  for (const endpoint of [
+    '/api/operations/receivable-settlements/1',
+    '/api/operations/payable-settlements/1',
+  ]) {
+    test(`DELETE ${endpoint} is registered and protected`, async () => {
+      const response = await app.request(endpoint, { method: 'DELETE' })
       expect(response.status).toBe(401)
     })
   }

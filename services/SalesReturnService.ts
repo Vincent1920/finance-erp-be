@@ -1,3 +1,4 @@
+import { SettlementService } from './SettlementService'
 import { transaction } from '../config/database'
 import { SalesReturnRepository } from '../repositories/SalesReturnRepository'
 import { ConflictError, NotFoundError, ValidationError } from '../utils/AppError'
@@ -77,6 +78,7 @@ export class SalesReturnService {
           itemId: Number(line.item_id),
           description: line.description,
           quantity: requested.quantity,
+          stockQuantity: multiplyDecimal(String(line.stock_quantity ?? line.quantity), 4, ratio, 8, 4),
           unitId: Number(line.unit_id),
           unitPrice: String(line.unit_price),
           discount: disc,
@@ -112,6 +114,10 @@ export class SalesReturnService {
           },
           lines,
         )
+      await connection.execute('UPDATE sales_returns SET return_stock=? WHERE id=?', [
+        input.return_stock,
+        id,
+      ])
       await this.log(connection, companyId, ctx, 'create', id, number, {
         status: 'draft',
         grandTotal: grand,
@@ -169,6 +175,13 @@ export class SalesReturnService {
       if (!h) throw new NotFoundError('Retur penjualan tidak ditemukan')
       if (h.status !== 'approved')
         throw new ConflictError('Hanya retur Approved yang dapat diposting')
+      if (!(await this.repo.invoice(connection, Number(h.sales_invoice_id), companyId)))
+        throw new ConflictError('Invoice sumber sudah tidak dapat diretur')
+      const sourceLines = await this.repo.invoiceLines(connection, Number(h.sales_invoice_id))
+      for (const source of sourceLines) {
+        if (compareDecimal(String(source.reserved_return_quantity), String(source.quantity), 4) > 0)
+          throw new ConflictError('Total retur melebihi kuantitas invoice sumber')
+      }
       if (!h.receivable_account_id)
         throw new ValidationError('Akun piutang pelanggan belum dikonfigurasi')
       const lines = await this.repo.lines(connection, id),
@@ -197,15 +210,15 @@ export class SalesReturnService {
             multiplyDecimal(String(l.tax_amount), 2, String(h.exchange_rate), 8),
             'Akun pajak keluaran belum dikonfigurasi',
           )
-        if (l.item_type === 'inventory') {
+        if (l.item_type === 'inventory' && h.return_stock) {
           if (!h.warehouse_id) throw new ValidationError('Gudang retur belum dikonfigurasi')
-          const unitCost = divideDecimal(String(l.cogs_amount), 2, String(l.quantity), 4, 6),
+          const unitCost = divideDecimal(String(l.cogs_amount), 2, String(l.stock_quantity ?? l.quantity), 4, 6),
             m = await this.inventory.applyMovement(connection, {
               companyId,
               itemId: Number(l.item_id),
               warehouseId: Number(h.warehouse_id),
               direction: 'in',
-              quantity: String(l.quantity),
+              quantity: String(l.stock_quantity ?? l.quantity),
               unitCost,
               transactionType: 'sales_return',
               transactionId: id,
@@ -222,12 +235,7 @@ export class SalesReturnService {
             m.totalCost,
             'Akun persediaan belum dikonfigurasi',
           )
-          this.add(
-            credits,
-            Number(l.purchase_account_id),
-            m.totalCost,
-            'Akun COGS belum dikonfigurasi',
-          )
+          this.add(credits, Number(l.cogs_account_id), m.totalCost, 'Akun COGS belum dikonfigurasi')
         }
         await connection.execute(
           'UPDATE sales_invoice_lines SET returned_quantity=returned_quantity+? WHERE id=?',
@@ -260,6 +268,13 @@ export class SalesReturnService {
         ['approved'],
         "status='posted',journal_id=?,posted_by=?,posted_at=NOW()",
         [journalId, ctx.userId],
+      )
+      await new SettlementService().refreshInvoice(
+        connection,
+        companyId,
+        true,
+        Number(h.sales_invoice_id),
+        ctx.userId,
       )
       await this.log(connection, companyId, ctx, 'post', id, String(h.return_number), {
         status: 'posted',
@@ -324,6 +339,13 @@ export class SalesReturnService {
         ['posted'],
         "status='reversed',reversal_journal_id=?,reversed_by=?,reversed_at=NOW()",
         [reversalJournalId, ctx.userId],
+      )
+      await new SettlementService().refreshInvoice(
+        connection,
+        companyId,
+        true,
+        Number(header.sales_invoice_id),
+        ctx.userId,
       )
       await this.log(connection, companyId, ctx, 'reverse', id, String(header.return_number), {
         status: 'reversed',

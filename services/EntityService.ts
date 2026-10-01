@@ -65,6 +65,7 @@ const referenceRules: Partial<
   ],
   items: [
     { field: 'unit_id', table: 'units', label: 'Satuan' },
+    { field: 'smallest_unit_id', table: 'units', label: 'Satuan terkecil' },
     { field: 'sales_account_id', table: 'accounts', label: 'Akun penjualan', postingOnly: true },
     {
       field: 'inventory_account_id',
@@ -153,6 +154,12 @@ export class EntityService {
     await this.validateReferences(connection, companyId, normalized)
     await this.validatePeriod(connection, companyId, normalized)
     const row = await this.repo.create(companyId, normalized, connection)
+    if (this.table === 'items' && row?.id && row?.unit_id)
+      await connection.execute(
+        `INSERT INTO item_units(company_id,item_id,unit_id,factor_to_stock,is_purchase,is_sales,is_active)
+         VALUES(?,?,?,1,TRUE,TRUE,TRUE) ON DUPLICATE KEY UPDATE factor_to_stock=1,is_active=TRUE`,
+        [companyId, Number(row.id), Number(row.unit_id)],
+      )
     await this.audit.log(connection, {
       companyId,
       userId: context.userId,
@@ -175,6 +182,15 @@ export class EntityService {
   ) {
     return transaction(async (connection) => {
       const existing = await this.get(id, companyId, connection)
+      if (
+        this.table === 'items' &&
+        data.unit_id !== undefined &&
+        Number(data.unit_id) !== Number(existing.unit_id) &&
+        (await this.repo.isInUse(id, companyId, connection))
+      )
+        throw new ConflictError(
+          'Satuan stok barang yang sudah dipakai transaksi tidak dapat diubah. Gunakan satuan terkecil dan faktor konversi untuk pelaporan.',
+        )
       if (
         this.table === 'accounting_periods' &&
         data.status !== undefined &&

@@ -32,11 +32,30 @@ export interface TrialBalanceRow extends RowDataPacket {
 }
 
 export class ReportRepository {
+  async companyReportingSettings(companyId: number) {
+    const [rows] = await db.execute<RowDataPacket[]>(
+      `SELECT fiscal_year_start, base_currency
+       FROM companies
+       WHERE id = ?
+       LIMIT 1`,
+      [companyId],
+    )
+    return rows[0] ?? { fiscal_year_start: 1, base_currency: 'IDR' }
+  }
+
   async generalLedger(companyId: number, filters: LedgerFilters) {
     const { page, limit, offset } = pagination(filters.page, filters.limit)
-    const conditions = ['j.company_id = ?', "j.status = 'posted'", 'j.journal_date BETWEEN ? AND ?']
+    const conditions = [
+      'j.company_id = ?',
+      "j.status IN ('posted','reversed')",
+      'j.journal_date BETWEEN ? AND ?',
+    ]
     const values: Array<string | number> = [companyId, filters.dateFrom, filters.dateTo]
-    const openingConditions = ['j.company_id = ?', "j.status = 'posted'", 'j.journal_date < ?']
+    const openingConditions = [
+      'j.company_id = ?',
+      "j.status IN ('posted','reversed')",
+      'j.journal_date < ?',
+    ]
     const openingValues: Array<string | number> = [companyId, filters.dateFrom]
 
     if (filters.accountId) {
@@ -57,11 +76,10 @@ export class ReportRepository {
       values.push(filters.projectId)
       openingValues.push(filters.projectId)
     }
-    if (filters.reference) {
-      conditions.push('(j.reference LIKE ? OR j.journal_number LIKE ? OR jl.description LIKE ?)')
-      const search = `%${filters.reference}%`
-      values.push(search, search, search)
-    }
+    const searchCondition = filters.reference
+      ? 'WHERE (reference LIKE ? OR journal_number LIKE ? OR description LIKE ? OR account_code LIKE ? OR account_name LIKE ?)'
+      : ''
+    const searchValues = filters.reference ? Array(5).fill('%' + filters.reference + '%') : []
 
     const [rows] = await db.query<RowDataPacket[]>(
       `WITH opening AS (
@@ -98,17 +116,17 @@ export class ReportRepository {
          LEFT JOIN cost_centers cc ON cc.id = jl.cost_center_id AND cc.company_id = j.company_id
          LEFT JOIN projects p ON p.id = jl.project_id AND p.company_id = j.company_id
          WHERE ${conditions.join(' AND ')}
-       )
-       SELECT
+       ), balances AS (SELECT
          entries.*,
          opening_balance + SUM(debit - credit) OVER (
            PARTITION BY account_id ORDER BY journal_date, journal_id, id
-         ) AS running_balance,
-         COUNT(*) OVER () AS total_rows
-       FROM entries
+         ) AS running_balance
+       FROM entries)
+       SELECT balances.*, COUNT(*) OVER () AS total_rows FROM balances
+       ${searchCondition}
        ORDER BY account_code, journal_date, journal_id, id
        LIMIT ? OFFSET ?`,
-      [...openingValues, ...values, limit, offset],
+      [...openingValues, ...values, ...searchValues, limit, offset],
     )
 
     return { rows, page, limit, total: Number(rows[0]?.total_rows ?? 0) }
@@ -134,7 +152,7 @@ export class ReportRepository {
          LEFT JOIN journals j
            ON j.id = jl.journal_id
           AND j.company_id = a.company_id
-          AND j.status = 'posted'
+          AND j.status IN ('posted','reversed')
           AND j.journal_date <= ?
          WHERE a.company_id = ?
            AND a.deleted_at IS NULL
@@ -171,19 +189,20 @@ export class ReportRepository {
          a.name,
          a.account_type,
          a.normal_balance,
-         COALESCE(SUM(jl.debit), 0) AS debit,
-         COALESCE(SUM(jl.credit), 0) AS credit
+         a.report_group,
+         COALESCE(SUM(CASE WHEN j.id IS NOT NULL THEN jl.debit ELSE 0 END), 0) AS debit,
+         COALESCE(SUM(CASE WHEN j.id IS NOT NULL THEN jl.credit ELSE 0 END), 0) AS credit
        FROM accounts a
        LEFT JOIN journal_lines jl ON jl.account_id = a.id
        LEFT JOIN journals j
          ON j.id = jl.journal_id
         AND j.company_id = a.company_id
-        AND j.status = 'posted'
+        AND j.status IN ('posted','reversed')
         AND j.journal_date BETWEEN ? AND ?
        WHERE a.company_id = ?
          AND a.deleted_at IS NULL
          AND a.is_posting = TRUE
-       GROUP BY a.id, a.code, a.name, a.account_type, a.normal_balance
+       GROUP BY a.id, a.code, a.name, a.account_type, a.normal_balance, a.report_group
        ORDER BY a.code`,
       [range.dateFrom, range.dateTo, companyId],
     )
@@ -198,14 +217,14 @@ export class ReportRepository {
          a.name,
          a.account_type,
          a.normal_balance,
-         COALESCE(SUM(jl.debit), 0) AS debit,
-         COALESCE(SUM(jl.credit), 0) AS credit
+         COALESCE(SUM(CASE WHEN j.id IS NOT NULL THEN jl.debit ELSE 0 END), 0) AS debit,
+         COALESCE(SUM(CASE WHEN j.id IS NOT NULL THEN jl.credit ELSE 0 END), 0) AS credit
        FROM accounts a
        LEFT JOIN journal_lines jl ON jl.account_id = a.id
        LEFT JOIN journals j
          ON j.id = jl.journal_id
         AND j.company_id = a.company_id
-        AND j.status = 'posted'
+        AND j.status IN ('posted','reversed')
         AND j.journal_date <= ?
        WHERE a.company_id = ?
          AND a.deleted_at IS NULL
@@ -219,34 +238,66 @@ export class ReportRepository {
 
   async cashFlow(companyId: number, range: DateRange) {
     const [rows] = await db.execute<RowDataPacket[]>(
-      `SELECT
-         CASE
-           WHEN j.source_type IN (
-             'fixed_asset_acquisition', 'fixed_asset_disposal', 'asset_depreciation'
-           ) THEN 'investing'
-           WHEN j.source_type IN (
-             'capital_contribution', 'dividend', 'loan_receipt', 'loan_payment', 'year_end_closing'
-           ) THEN 'financing'
-           ELSE 'operating'
-         END AS activity,
+      `WITH cash_accounts AS (
+         SELECT DISTINCT a.id
+         FROM accounts a
+         INNER JOIN bank_accounts ba
+           ON ba.gl_account_id = a.id
+          AND ba.company_id = a.company_id
+          AND ba.is_active = TRUE
+         WHERE a.company_id = ? AND a.deleted_at IS NULL
+         UNION
+         SELECT DISTINCT a.id
+         FROM settings s
+         INNER JOIN accounts a
+           ON a.id = CAST(s.setting_value AS UNSIGNED)
+          AND a.company_id = s.company_id
+          AND a.deleted_at IS NULL
+         WHERE s.company_id = ?
+           AND s.setting_key IN ('default_cash_account_id', 'default_bank_account_id')
+       ), journal_activity AS (
+         SELECT
+           j.id,
+           COALESCE(
+             CASE
+               WHEN COUNT(DISTINCT CASE
+                 WHEN ca.id IS NULL
+                  AND oa.cash_flow_category IN ('operating', 'investing', 'financing')
+                 THEN oa.cash_flow_category
+               END) = 1
+               THEN MAX(CASE
+                 WHEN ca.id IS NULL
+                  AND oa.cash_flow_category IN ('operating', 'investing', 'financing')
+                 THEN oa.cash_flow_category
+               END)
+             END,
+             CASE
+               WHEN j.source_type IN ('fixed_asset_acquisition', 'fixed_asset_disposal')
+                 THEN 'investing'
+               WHEN j.source_type IN (
+                 'capital_contribution', 'dividend', 'loan_receipt', 'loan_payment',
+                 'year_end_closing'
+               ) THEN 'financing'
+               ELSE 'operating'
+             END
+           ) AS activity
+         FROM journals j
+         INNER JOIN journal_lines ol ON ol.journal_id = j.id
+         INNER JOIN accounts oa ON oa.id = ol.account_id AND oa.company_id = j.company_id
+         LEFT JOIN cash_accounts ca ON ca.id = oa.id
+         WHERE j.company_id = ?
+           AND j.status IN ('posted','reversed')
+           AND j.journal_date BETWEEN ? AND ?
+         GROUP BY j.id, j.source_type
+       )
+       SELECT
+         ja.activity,
          COALESCE(SUM(jl.debit - jl.credit), 0) AS amount
-       FROM journals j
-       INNER JOIN journal_lines jl ON jl.journal_id = j.id
-       INNER JOIN accounts a ON a.id = jl.account_id AND a.company_id = j.company_id
-       LEFT JOIN bank_accounts ba
-         ON ba.gl_account_id = a.id AND ba.company_id = j.company_id AND ba.is_active = TRUE
-       WHERE j.company_id = ?
-         AND j.status = 'posted'
-         AND j.journal_date BETWEEN ? AND ?
-         AND (
-           ba.id IS NOT NULL OR a.id IN (
-             SELECT CAST(setting_value AS UNSIGNED)
-             FROM settings
-             WHERE company_id = ? AND setting_key IN ('default_cash_account_id', 'default_bank_account_id')
-           )
-         )
-       GROUP BY activity`,
-      [companyId, range.dateFrom, range.dateTo, companyId],
+       FROM journal_activity ja
+       INNER JOIN journal_lines jl ON jl.journal_id = ja.id
+       INNER JOIN cash_accounts ca ON ca.id = jl.account_id
+       GROUP BY ja.activity`,
+      [companyId, companyId, companyId, range.dateFrom, range.dateTo],
     )
     const [balanceRows] = await db.execute<RowDataPacket[]>(
       `SELECT
@@ -260,7 +311,7 @@ export class ReportRepository {
        LEFT JOIN bank_accounts ba
          ON ba.gl_account_id = a.id AND ba.company_id = j.company_id AND ba.is_active = TRUE
        WHERE j.company_id = ?
-         AND j.status = 'posted'
+         AND j.status IN ('posted','reversed')
          AND (
            ba.id IS NOT NULL OR a.id IN (
              SELECT CAST(setting_value AS UNSIGNED)
@@ -298,9 +349,11 @@ export class ReportRepository {
          i.base_grand_total AS original_amount,
          COALESCE(payments.paid_amount, 0) AS paid_amount,
          COALESCE(returns.returned_amount, 0) AS returned_amount,
+         COALESCE(credits.credit_amount, 0) AS credit_amount,
          GREATEST(
            i.base_grand_total - COALESCE(payments.paid_amount, 0)
-             - COALESCE(returns.returned_amount, 0),
+             - COALESCE(returns.returned_amount, 0)
+             - COALESCE(credits.credit_amount, 0),
            0
          ) AS outstanding_amount,
          GREATEST(DATEDIFF(?, i.due_date), 0) AS days_overdue,
@@ -326,11 +379,20 @@ export class ReportRepository {
          WHERE r.company_id = ? AND r.status = 'posted' AND r.return_date <= ?
          GROUP BY r.${returnInvoiceKey}
        ) returns ON returns.invoice_id = i.id
+       LEFT JOIN (
+         SELECT ca.target_invoice_id AS invoice_id, SUM(ca.base_amount) AS credit_amount
+         FROM party_credit_applications ca
+         INNER JOIN party_credits pc ON pc.id=ca.party_credit_id
+         WHERE ca.company_id=? AND ca.status='posted' AND ca.application_type='invoice'
+           AND ca.application_date<=? AND pc.party_type=?
+         GROUP BY ca.target_invoice_id
+       ) credits ON credits.invoice_id=i.id
        WHERE i.company_id = ?
          AND i.status IN ('posted', 'partially_paid', 'paid')
          AND i.invoice_date <= ?
          AND i.base_grand_total - COALESCE(payments.paid_amount, 0)
-             - COALESCE(returns.returned_amount, 0) > 0
+             - COALESCE(returns.returned_amount, 0)
+             - COALESCE(credits.credit_amount, 0) > 0
        ORDER BY i.due_date, i.invoice_number`,
       [
         asOfDate,
@@ -340,6 +402,9 @@ export class ReportRepository {
         asOfDate,
         companyId,
         asOfDate,
+        companyId,
+        asOfDate,
+        side === 'receivable' ? 'customer' : 'supplier',
         companyId,
         asOfDate,
         companyId,
@@ -406,64 +471,66 @@ export class ReportRepository {
 
   async subledgerReconciliation(companyId: number, asOfDate: string) {
     const [rows] = await db.execute<RowDataPacket[]>(
-      `WITH mappings AS (
-         SELECT setting_key, CAST(setting_value AS UNSIGNED) AS account_id
-         FROM settings
-         WHERE company_id = ? AND setting_key IN (
-           'default_ar_account_id', 'default_ap_account_id', 'default_inventory_account_id'
-         )
-       ), gl AS (
+      `WITH gl AS (
          SELECT jl.account_id, COALESCE(SUM(jl.debit - jl.credit), 0) AS debit_balance
          FROM journal_lines jl
          INNER JOIN journals j ON j.id = jl.journal_id
-         WHERE j.company_id = ? AND j.status = 'posted' AND j.journal_date <= ?
+         WHERE j.company_id = ? AND j.status IN ('posted','reversed') AND j.journal_date <= ?
          GROUP BY jl.account_id
+       ), control_accounts AS (
+         SELECT 'ar' reconciliation_type,c.receivable_account_id account_id FROM customers c WHERE c.company_id=? AND c.receivable_account_id IS NOT NULL GROUP BY c.receivable_account_id
+         UNION SELECT 'ap',s.payable_account_id FROM suppliers s WHERE s.company_id=? AND s.payable_account_id IS NOT NULL GROUP BY s.payable_account_id
+         UNION SELECT 'inventory',i.inventory_account_id FROM items i WHERE i.company_id=? AND i.inventory_account_id IS NOT NULL GROUP BY i.inventory_account_id
+         UNION SELECT 'bank',b.gl_account_id FROM bank_accounts b WHERE b.company_id=? AND b.is_active=TRUE AND b.deleted_at IS NULL GROUP BY b.gl_account_id
+       ), subledger AS (
+         SELECT 'ar' reconciliation_type,c.receivable_account_id account_id,
+           COALESCE(SUM(si.base_grand_total),0)
+           -COALESCE((SELECT SUM(a.base_amount) FROM customer_payment_allocations a JOIN customer_payments p ON p.id=a.customer_payment_id JOIN sales_invoices x ON x.id=a.sales_invoice_id JOIN customers cp ON cp.id=x.customer_id WHERE p.company_id=? AND p.status='posted' AND p.payment_date<=? AND cp.receivable_account_id=c.receivable_account_id),0)
+           -COALESCE((SELECT SUM(r.base_grand_total) FROM sales_returns r JOIN customers cr ON cr.id=r.customer_id WHERE r.company_id=? AND r.status='posted' AND r.return_date<=? AND cr.receivable_account_id=c.receivable_account_id),0)
+           +COALESCE((SELECT SUM(a.base_amount) FROM party_credit_applications a JOIN party_credits pc ON pc.id=a.party_credit_id WHERE a.company_id=? AND pc.party_type='customer' AND pc.control_account_id=c.receivable_account_id AND a.application_type='refund' AND a.status='posted' AND a.application_date<=?),0) amount
+         FROM customers c LEFT JOIN sales_invoices si ON si.customer_id=c.id AND si.company_id=c.company_id AND si.invoice_date<=? AND si.status IN('posted','partially_paid','paid') WHERE c.company_id=? AND c.receivable_account_id IS NOT NULL GROUP BY c.receivable_account_id
+         UNION ALL
+         SELECT 'ap',s.payable_account_id,
+           COALESCE(SUM(pi.base_grand_total),0)
+           -COALESCE((SELECT SUM(a.base_amount) FROM supplier_payment_allocations a JOIN supplier_payments p ON p.id=a.supplier_payment_id JOIN purchase_invoices x ON x.id=a.purchase_invoice_id JOIN suppliers sp ON sp.id=x.supplier_id WHERE p.company_id=? AND p.status='posted' AND p.payment_date<=? AND sp.payable_account_id=s.payable_account_id),0)
+           -COALESCE((SELECT SUM(r.base_grand_total) FROM purchase_returns r JOIN suppliers sr ON sr.id=r.supplier_id WHERE r.company_id=? AND r.status='posted' AND r.return_date<=? AND sr.payable_account_id=s.payable_account_id),0)
+           +COALESCE((SELECT SUM(a.base_amount) FROM party_credit_applications a JOIN party_credits pc ON pc.id=a.party_credit_id WHERE a.company_id=? AND pc.party_type='supplier' AND pc.control_account_id=s.payable_account_id AND a.application_type='refund' AND a.status='posted' AND a.application_date<=?),0)
+         FROM suppliers s LEFT JOIN purchase_invoices pi ON pi.supplier_id=s.id AND pi.company_id=s.company_id AND pi.invoice_date<=? AND pi.status IN('posted','partially_paid','paid') WHERE s.company_id=? AND s.payable_account_id IS NOT NULL GROUP BY s.payable_account_id
+         UNION ALL
+         SELECT 'inventory',i.inventory_account_id,SUM(CASE WHEN im.quantity_in>0 THEN im.total_cost ELSE -im.total_cost END) FROM inventory_movements im JOIN items i ON i.id=im.item_id AND i.company_id=im.company_id WHERE im.company_id=? AND im.movement_date<=? AND i.inventory_account_id IS NOT NULL GROUP BY i.inventory_account_id
+         UNION ALL
+         SELECT 'bank',b.gl_account_id,COALESCE(SUM((SELECT bs.closing_balance FROM bank_statements bs WHERE bs.company_id=b.company_id AND bs.bank_account_id=b.id AND bs.period_end<=? ORDER BY bs.period_end DESC,bs.id DESC LIMIT 1)),0) FROM bank_accounts b WHERE b.company_id=? AND b.is_active=TRUE AND b.deleted_at IS NULL GROUP BY b.gl_account_id
        )
-       SELECT 'ar' AS reconciliation_type,
-         COALESCE((
-           SELECT SUM(base_grand_total - paid_amount)
-           FROM sales_invoices
-           WHERE company_id = ? AND invoice_date <= ?
-             AND status IN ('posted', 'partially_paid', 'paid')
-         ), 0) AS subledger,
-         COALESCE((SELECT debit_balance FROM gl WHERE account_id = (
-           SELECT account_id FROM mappings WHERE setting_key = 'default_ar_account_id'
-         )), 0) AS general_ledger
-       UNION ALL
-       SELECT 'ap',
-         COALESCE((
-           SELECT SUM(base_grand_total - paid_amount)
-           FROM purchase_invoices
-           WHERE company_id = ? AND invoice_date <= ?
-             AND status IN ('posted', 'partially_paid', 'paid')
-         ), 0),
-         -COALESCE((SELECT debit_balance FROM gl WHERE account_id = (
-           SELECT account_id FROM mappings WHERE setting_key = 'default_ap_account_id'
-         )), 0)
-       UNION ALL
-       SELECT 'inventory',
-         COALESCE((SELECT SUM(total_value) FROM inventory_balances WHERE company_id = ?), 0),
-         COALESCE((SELECT debit_balance FROM gl WHERE account_id = (
-           SELECT account_id FROM mappings WHERE setting_key = 'default_inventory_account_id'
-         )), 0)
-       UNION ALL
-       SELECT 'bank',
-         COALESCE((SELECT SUM(current_balance) FROM bank_accounts WHERE company_id = ?), 0),
-         COALESCE((
-           SELECT SUM(gl.debit_balance)
-           FROM gl INNER JOIN bank_accounts ba ON ba.gl_account_id = gl.account_id
-           WHERE ba.company_id = ? AND ba.is_active = TRUE
-         ), 0)`,
+       SELECT ca.reconciliation_type,a.id account_id,a.code account_code,a.name account_name,COALESCE(s.amount,0) subledger,
+         CASE WHEN ca.reconciliation_type='ap' THEN -COALESCE(gl.debit_balance,0) ELSE COALESCE(gl.debit_balance,0) END general_ledger
+       FROM control_accounts ca JOIN accounts a ON a.id=ca.account_id LEFT JOIN subledger s ON s.reconciliation_type=ca.reconciliation_type AND s.account_id=ca.account_id LEFT JOIN gl ON gl.account_id=ca.account_id
+       ORDER BY FIELD(ca.reconciliation_type,'ar','ap','inventory','bank'),a.code`,
       [
         companyId,
+        asOfDate,
+        companyId,
+        companyId,
+        companyId,
+        companyId,
         companyId,
         asOfDate,
         companyId,
         asOfDate,
         companyId,
         asOfDate,
+        asOfDate,
         companyId,
         companyId,
+        asOfDate,
+        companyId,
+        asOfDate,
+        companyId,
+        asOfDate,
+        asOfDate,
+        companyId,
+        companyId,
+        asOfDate,
+        asOfDate,
         companyId,
       ],
     )
@@ -511,7 +578,7 @@ export class ReportRepository {
            SUM(jl.debit - jl.credit) AS amount
          FROM journal_lines jl
          INNER JOIN journals j ON j.id = jl.journal_id
-         WHERE j.company_id = ? AND j.status = 'posted' AND j.journal_date BETWEEN ? AND ?
+         WHERE j.company_id = ? AND j.status IN ('posted','reversed') AND j.journal_date BETWEEN ? AND ?
          GROUP BY jl.account_id, MONTH(j.journal_date), jl.cost_center_id, jl.project_id
        ) actual
          ON actual.account_id = bl.account_id

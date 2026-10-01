@@ -42,19 +42,15 @@ export const journalListQuerySchema = z.object({
   limit: z.string().optional(),
   search: z.string().trim().max(191).optional(),
   status: z
-    .enum([
-      'draft',
-      'pending_approval',
-      'approved',
-      'rejected',
-      'posted',
-      'reversed',
-      'cancelled',
-    ])
+    .enum(['draft', 'pending_approval', 'approved', 'rejected', 'posted', 'reversed', 'cancelled'])
     .optional(),
   date_from: isoDateSchema.optional(),
   date_to: isoDateSchema.optional(),
   source_type: z.string().trim().max(50).optional(),
+  sort: z
+    .enum(['journal_number', 'journal_date', 'description', 'source_type', 'total_debit', 'status'])
+    .default('journal_date'),
+  order: z.enum(['asc', 'desc']).default('desc'),
 })
 
 export const rejectionSchema = z.object({ comments: z.string().trim().min(3).max(1000) })

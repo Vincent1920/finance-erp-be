@@ -116,6 +116,8 @@ export class InventoryRepository {
          i.minimum_stock,
          u.code AS unit_code,
          u.symbol AS unit_symbol,
+         COALESCE(su.symbol,u.symbol) AS smallest_unit_symbol,
+         ib.quantity * i.smallest_unit_factor AS smallest_quantity,
          ib.warehouse_id,
          w.code AS warehouse_code,
          w.name AS warehouse_name,
@@ -131,6 +133,7 @@ export class InventoryRepository {
        INNER JOIN items i ON i.id = ib.item_id AND i.company_id = ib.company_id
        INNER JOIN warehouses w ON w.id = ib.warehouse_id AND w.company_id = ib.company_id
        INNER JOIN units u ON u.id = i.unit_id AND u.company_id = ib.company_id
+       LEFT JOIN units su ON su.id = i.smallest_unit_id AND su.company_id = ib.company_id
        WHERE ${where}
        ORDER BY i.sku, w.code
        LIMIT ? OFFSET ?`,
@@ -150,7 +153,8 @@ export class InventoryRepository {
   async card(
     companyId: number,
     query: {
-      itemId: number
+      itemId?: number
+      itemIds?: number[]
       warehouseId?: number
       dateFrom: string
       dateTo: string
@@ -159,8 +163,17 @@ export class InventoryRepository {
     },
   ) {
     const { page, limit, offset } = pagination(query.page, query.limit)
-    const warehouseCondition = query.warehouseId ? 'AND im.warehouse_id = ?' : ''
-    const baseValues: Array<string | number> = [companyId, query.itemId]
+    const selectedItemIds = query.itemIds?.length
+      ? [...new Set(query.itemIds)]
+      : query.itemId
+        ? [query.itemId]
+        : []
+    const warehouseCondition =
+      (selectedItemIds.length
+        ? `AND im.item_id IN (${selectedItemIds.map(() => '?').join(',')}) `
+        : '') + (query.warehouseId ? 'AND im.warehouse_id = ?' : '')
+    const baseValues: Array<string | number> = [companyId]
+    baseValues.push(...selectedItemIds)
     if (query.warehouseId) baseValues.push(query.warehouseId)
     const [openingRows] = await db.execute<RowDataPacket[]>(
       `SELECT
@@ -168,28 +181,80 @@ export class InventoryRepository {
          COALESCE(SUM(CASE WHEN im.quantity_in > 0 THEN im.total_cost ELSE -im.total_cost END), 0)
            AS opening_value
        FROM inventory_movements im
-       WHERE im.company_id = ? AND im.item_id = ? ${warehouseCondition}
+       WHERE im.company_id = ? ${warehouseCondition}
          AND im.movement_date < ?`,
       [...baseValues, query.dateFrom],
     )
     const [rows] = await db.query<RowDataPacket[]>(
-      `SELECT
-         im.*,
-         i.sku,
-         i.name AS item_name,
-         w.code AS warehouse_code,
-         w.name AS warehouse_name,
-         u.symbol AS unit_symbol,
-         COUNT(*) OVER () AS total_rows
-       FROM inventory_movements im
-       INNER JOIN items i ON i.id = im.item_id AND i.company_id = im.company_id
-       INNER JOIN units u ON u.id = i.unit_id AND u.company_id = im.company_id
-       INNER JOIN warehouses w ON w.id = im.warehouse_id AND w.company_id = im.company_id
-       WHERE im.company_id = ? AND im.item_id = ? ${warehouseCondition}
-         AND im.movement_date BETWEEN ? AND ?
-       ORDER BY im.movement_date, im.id
+      `WITH movements AS (
+         SELECT
+           im.id, im.movement_date, im.transaction_type, im.transaction_number,
+           im.item_id, im.warehouse_id, im.quantity_in, im.quantity_out,
+           im.unit_cost, im.total_cost,
+           SUM(im.quantity_in-im.quantity_out) OVER (
+             PARTITION BY im.item_id,im.warehouse_id ORDER BY im.movement_date,im.id
+           ) AS chronological_quantity,
+           SUM(CASE WHEN im.quantity_in>0 THEN im.total_cost ELSE -im.total_cost END) OVER (
+             PARTITION BY im.item_id,im.warehouse_id ORDER BY im.movement_date,im.id
+           ) AS chronological_value,
+           i.sku, i.name AS item_name,
+           w.code AS warehouse_code, w.name AS warehouse_name,
+           u.symbol AS unit_symbol,
+           COALESCE(su.symbol,u.symbol) AS smallest_unit_symbol,
+           i.smallest_unit_factor,
+           im.quantity_in*i.smallest_unit_factor AS smallest_quantity_in,
+           im.quantity_out*i.smallest_unit_factor AS smallest_quantity_out
+         FROM inventory_movements im
+         INNER JOIN items i ON i.id=im.item_id AND i.company_id=im.company_id
+         INNER JOIN units u ON u.id=i.unit_id AND u.company_id=im.company_id
+         LEFT JOIN units su ON su.id=i.smallest_unit_id AND su.company_id=im.company_id
+         INNER JOIN warehouses w ON w.id=im.warehouse_id AND w.company_id=im.company_id
+         WHERE im.company_id=? ${warehouseCondition} AND im.movement_date<=?
+       ), opening AS (
+         SELECT
+           item_id, warehouse_id,
+           MAX(sku) AS sku, MAX(item_name) AS item_name,
+           MAX(warehouse_code) AS warehouse_code, MAX(warehouse_name) AS warehouse_name,
+           MAX(unit_symbol) AS unit_symbol,
+           MAX(smallest_unit_symbol) AS smallest_unit_symbol,
+           MAX(smallest_unit_factor) AS smallest_unit_factor,
+           SUM(quantity_in-quantity_out) AS opening_quantity,
+           SUM(CASE WHEN quantity_in>0 THEN total_cost ELSE -total_cost END) AS opening_value
+         FROM movements
+         WHERE movement_date<?
+         GROUP BY item_id,warehouse_id
+         HAVING ABS(SUM(quantity_in-quantity_out))>0.000001
+       ), report_rows AS (
+         SELECT
+           0 AS id, ? AS movement_date, 'opening_balance' AS transaction_type,
+           'SALDO AWAL' AS transaction_number,
+           o.item_id, o.warehouse_id, 0 AS quantity_in, 0 AS quantity_out,
+           CASE WHEN o.opening_quantity=0 THEN 0 ELSE o.opening_value/o.opening_quantity END AS unit_cost,
+           0 AS total_cost,
+           o.opening_quantity AS chronological_quantity,
+           o.opening_value AS chronological_value,
+           o.sku, o.item_name, o.warehouse_code, o.warehouse_name,
+           o.unit_symbol, o.smallest_unit_symbol, o.smallest_unit_factor,
+           0 AS smallest_quantity_in, 0 AS smallest_quantity_out,
+           'opening' AS row_kind, 0 AS sort_order
+         FROM opening o
+         UNION ALL
+         SELECT
+           m.id, m.movement_date, m.transaction_type, m.transaction_number,
+           m.item_id, m.warehouse_id, m.quantity_in, m.quantity_out,
+           m.unit_cost, m.total_cost, m.chronological_quantity, m.chronological_value,
+           m.sku, m.item_name, m.warehouse_code, m.warehouse_name,
+           m.unit_symbol, m.smallest_unit_symbol, m.smallest_unit_factor,
+           m.smallest_quantity_in, m.smallest_quantity_out,
+           'movement' AS row_kind, 1 AS sort_order
+         FROM movements m
+         WHERE m.movement_date>=?
+       )
+       SELECT report_rows.*, COUNT(*) OVER () AS total_rows
+       FROM report_rows
+       ORDER BY movement_date,sort_order,sku,warehouse_code,id
        LIMIT ? OFFSET ?`,
-      [...baseValues, query.dateFrom, query.dateTo, limit, offset],
+      [...baseValues, query.dateTo, query.dateFrom, query.dateFrom, query.dateFrom, limit, offset],
     )
     return {
       rows,

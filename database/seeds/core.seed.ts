@@ -70,6 +70,7 @@ const modules = [
   'attachments',
   'opening-balances',
   'document-templates',
+  'tax-reconciliation',
   'imports',
   'exports',
 ] as const

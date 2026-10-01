@@ -3,7 +3,10 @@ import { z } from 'zod'
 import { compareDecimal, normalizeDecimal } from '../utils/decimal'
 
 const decimalInput = z.union([
-  z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/, 'Format angka decimal tidak valid'),
+  z
+    .string()
+    .trim()
+    .regex(/^[+-]?\d+(?:\.\d+)?$/, 'Format angka decimal tidak valid'),
   z.number().finite(),
 ])
 
@@ -32,14 +35,22 @@ export const decimalSchema = (
 
 export const moneySchema = decimalSchema(2, { nonnegative: true })
 export const positiveMoneySchema = decimalSchema(2, { positive: true })
-export const quantitySchema = decimalSchema(4, { positive: true })
-export const nonnegativeQuantitySchema = decimalSchema(4, { nonnegative: true })
+const quantityInput = decimalInput.refine(
+  (value) => /^\+?\d+(?:\.\d)?0*$/.test(String(value)),
+  'QTY hanya boleh memiliki 1 angka setelah koma',
+)
+export const quantitySchema = quantityInput.pipe(decimalSchema(4, { positive: true }))
+export const nonnegativeQuantitySchema = quantityInput.pipe(decimalSchema(4, { nonnegative: true }))
 export const exchangeRateSchema = decimalSchema(8, { positive: true })
 export const percentageSchema = decimalSchema(4, { nonnegative: true, max: '100' })
 export const positiveIdSchema = z.coerce.number().int().positive()
 export const optionalIdSchema = positiveIdSchema.nullable().optional()
 export const isoDateSchema = z.iso.date()
-export const currencySchema = z.string().trim().length(3).transform((value) => value.toUpperCase())
+export const currencySchema = z
+  .string()
+  .trim()
+  .length(3)
+  .transform((value) => value.toUpperCase())
 
 export const listQuerySchema = z.object({
   page: z.string().optional(),

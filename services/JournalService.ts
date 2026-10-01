@@ -31,6 +31,9 @@ export class JournalService {
       date_from?: string
       date_to?: string
       source_type?: string
+      sort?:
+        'journal_number' | 'journal_date' | 'description' | 'source_type' | 'total_debit' | 'status'
+      order?: 'asc' | 'desc'
     },
   ) {
     return this.repository.list(companyId, {
@@ -264,7 +267,7 @@ export class JournalService {
   ) {
     const journal = await this.repository.findForUpdate(connection, id, companyId)
     if (!journal) throw new NotFoundError('Jurnal tidak ditemukan')
-    this.ensureManual(journal.source_type)
+    this.ensureWorkflowSource(journal.source_type)
     if (!change.allowed.includes(journal.status)) {
       throw new ConflictError(`Jurnal berstatus ${journal.status} tidak dapat ${change.action}`)
     }
@@ -300,6 +303,11 @@ export class JournalService {
 
   private ensureManual(sourceType: string | null) {
     if (sourceType) throw new ConflictError('Jurnal sumber transaksi dikelola dari dokumen asal')
+  }
+
+  private ensureWorkflowSource(sourceType: string | null) {
+    if (sourceType && sourceType !== 'recurring_journal')
+      throw new ConflictError('Jurnal sumber transaksi dikelola dari dokumen asal')
   }
 
   private timestamp() {

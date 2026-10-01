@@ -144,7 +144,9 @@ export class PostingService {
   }
 
   async createPostedJournal(connection: QueryExecutor, input: SourceJournalInput) {
-    await this.validation.ensureOpenPeriod(connection, input.companyId, input.date)
+    if (['year_end_closing', 'year_end_retained_earnings'].includes(input.sourceType))
+      await this.validation.ensureClosedPeriod(connection, input.companyId, input.date)
+    else await this.validation.ensureOpenPeriod(connection, input.companyId, input.date)
     const existing = await this.journals.findPostedSource(
       connection,
       input.companyId,
@@ -235,7 +237,9 @@ export class PostingService {
       throw new ConflictError('Hanya jurnal posted yang dapat direversal')
     }
 
-    await this.validation.ensureOpenPeriod(connection, input.companyId, input.date)
+    if ((input.sourceType ?? '').startsWith('year_end_'))
+      await this.validation.ensureClosedPeriod(connection, input.companyId, input.date)
+    else await this.validation.ensureOpenPeriod(connection, input.companyId, input.date)
     const originalLines = await this.journals.lines(connection, input.journalId)
     const reversalLines: JournalLineInput[] = originalLines.map((line) => ({
       accountId: Number(line.account_id),

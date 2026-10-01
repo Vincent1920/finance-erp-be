@@ -20,6 +20,7 @@ const line = z
     discount: moneySchema.default('0.00'),
     discount_percent: percentageSchema.default('0.0000'),
     tax_code_id: optionalIdSchema,
+    withholding_tax_id: optionalIdSchema,
     expense_account_id: optionalIdSchema,
   })
   .refine((value) => value.discount === '0.00' || value.discount_percent === '0.0000', {
@@ -32,6 +33,7 @@ export const purchaseInvoiceSchema = z
     invoice_date: isoDateSchema,
     due_date: isoDateSchema,
     supplier_id: positiveIdSchema,
+    withholding_tax_id: z.null().optional(),
     warehouse_id: optionalIdSchema,
     reference: z.string().trim().max(100).nullable().optional(),
     notes: z.string().trim().max(5000).nullable().optional(),

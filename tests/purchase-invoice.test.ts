@@ -32,6 +32,18 @@ describe('purchase invoice validation', () => {
       currency: 'IDR',
     })
   })
+  test('places withholding tax on the taxable service line instead of the invoice header', () => {
+    const parsed = purchaseInvoiceSchema.parse({
+      ...payload,
+      lines: [
+        payload.lines[0],
+        { ...payload.lines[0], item_id: 2, tax_code_id: null, withholding_tax_id: 9 },
+      ],
+    })
+    expect(parsed.lines[0]?.withholding_tax_id).toBeUndefined()
+    expect(parsed.lines[1]?.withholding_tax_id).toBe(9)
+    expect(() => purchaseInvoiceSchema.parse({ ...payload, withholding_tax_id: 9 })).toThrow()
+  })
   test('rejects due date before invoice date and simultaneous discounts', () => {
     expect(() => purchaseInvoiceSchema.parse({ ...payload, due_date: '2026-08-31' })).toThrow()
     expect(() =>

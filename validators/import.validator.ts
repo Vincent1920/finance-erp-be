@@ -21,19 +21,12 @@ const blankToNull = (value: unknown) =>
     : value
 
 const requiredText = (max = 191) => z.string().trim().min(1).max(max)
-const optionalText = (max = 191) =>
-  z.preprocess(blankToNull, z.string().trim().max(max).nullable())
+const optionalText = (max = 191) => z.preprocess(blankToNull, z.string().trim().max(max).nullable())
 const optionalEmail = z.preprocess(blankToNull, z.email().max(191).nullable())
 const optionalCode = optionalText(100)
 const optionalMoney = z.preprocess(blankToUndefined, moneySchema.default('0.00'))
-const optionalSignedMoney = z.preprocess(
-  blankToUndefined,
-  decimalSchema(2).default('0.00'),
-)
-const optionalQuantity = z.preprocess(
-  blankToUndefined,
-  nonnegativeQuantitySchema.default('0.0000'),
-)
+const optionalSignedMoney = z.preprocess(blankToUndefined, decimalSchema(2).default('0.00'))
+const optionalQuantity = z.preprocess(blankToUndefined, nonnegativeQuantitySchema.default('0.0000'))
 const optionalInteger = (defaultValue = 0) =>
   z.preprocess(
     blankToUndefined,
@@ -58,7 +51,10 @@ const customer = z.object({
   phone: optionalText(50),
   address: optionalText(5000),
   city: optionalText(100),
-  tax_number: optionalText(50),
+  tax_number: z
+    .string()
+    .trim()
+    .regex(/^\d{16}$/, 'NPWP wajib tepat 16 digit angka'),
   payment_term: optionalInteger(),
   currency: optionalCurrency,
   credit_limit: optionalMoney,
@@ -75,7 +71,10 @@ const supplier = z.object({
   phone: optionalText(50),
   address: optionalText(5000),
   city: optionalText(100),
-  tax_number: optionalText(50),
+  tax_number: z
+    .string()
+    .trim()
+    .regex(/^\d{16}$/, 'NPWP wajib tepat 16 digit angka'),
   payment_term: optionalInteger(),
   currency: optionalCurrency,
   payable_account_code: optionalCode,

@@ -11,6 +11,17 @@ export interface DashboardSummary {
   payables: number
   inventoryValue: number
   bankBalance: number
+  workQueue: {
+    overdueInvoices: number
+    receivablesDueThisWeek: number
+    payablesDueThisWeek: number
+    pendingApprovals: number
+    unmatchedBankLines: number
+    openTaxPeriods: number
+    lowStockItems: number
+    unfinishedPayroll: number
+    periodsToClose: number
+  }
   monthly: Array<{ month: string; sales: number; purchases: number }>
   recentJournals: Array<{
     id: number
@@ -74,6 +85,19 @@ export class DashboardRepository {
        ORDER BY month_key`,
       [companyId, companyId],
     )
+    const [workRows] = await db.execute<RowDataPacket[]>(
+      `SELECT
+        (SELECT COUNT(*) FROM sales_invoices WHERE company_id=? AND status IN ('posted','partially_paid') AND outstanding_amount>0 AND due_date<CURRENT_DATE) overdueInvoices,
+        (SELECT COUNT(*) FROM sales_invoices WHERE company_id=? AND status IN ('posted','partially_paid') AND outstanding_amount>0 AND due_date BETWEEN CURRENT_DATE AND DATE_ADD(CURRENT_DATE, INTERVAL 7 DAY)) receivablesDueThisWeek,
+        (SELECT COUNT(*) FROM purchase_invoices WHERE company_id=? AND status IN ('posted','partially_paid') AND outstanding_amount>0 AND due_date BETWEEN CURRENT_DATE AND DATE_ADD(CURRENT_DATE, INTERVAL 7 DAY)) payablesDueThisWeek,
+        (SELECT COUNT(*) FROM approval_requests WHERE company_id=? AND status='pending') pendingApprovals,
+        (SELECT COUNT(*) FROM bank_statement_lines l JOIN bank_statements s ON s.id=l.bank_statement_id WHERE s.company_id=? AND l.reconciliation_status IN ('unmatched','partial')) unmatchedBankLines,
+        (SELECT COUNT(*) FROM tax_reconciliation_periods WHERE company_id=? AND status<>'locked') openTaxPeriods,
+        (SELECT COUNT(*) FROM items i LEFT JOIN (SELECT company_id,item_id,SUM(quantity) quantity FROM inventory_balances GROUP BY company_id,item_id) b ON b.company_id=i.company_id AND b.item_id=i.id WHERE i.company_id=? AND i.item_type='inventory' AND i.is_active=TRUE AND i.deleted_at IS NULL AND i.minimum_stock>0 AND COALESCE(b.quantity,0)<i.minimum_stock) lowStockItems,
+        (SELECT COUNT(*) FROM payroll_runs WHERE company_id=? AND period=DATE_FORMAT(CURRENT_DATE,'%Y-%m') AND status<>'locked') unfinishedPayroll,
+        (SELECT COUNT(*) FROM accounting_periods WHERE company_id=? AND status<>'closed' AND end_date<=LAST_DAY(CURRENT_DATE)) periodsToClose`,
+      [companyId, companyId, companyId, companyId, companyId, companyId, companyId, companyId, companyId],
+    )
     const [journalRows] = await db.execute<RowDataPacket[]>(
       `SELECT id, journal_number, journal_date, description, total_debit, status
        FROM journals WHERE company_id = ?
@@ -81,7 +105,7 @@ export class DashboardRepository {
       [companyId],
     )
 
-    const row = rows[0]
+    const row = rows[0], work = workRows[0]
 
     return {
       customers: Number(row?.customers ?? 0),
@@ -92,6 +116,17 @@ export class DashboardRepository {
       payables: Number(row?.payables ?? 0),
       inventoryValue: Number(row?.inventoryValue ?? 0),
       bankBalance: Number(row?.bankBalance ?? 0),
+      workQueue: {
+        overdueInvoices: Number(work?.overdueInvoices ?? 0),
+        receivablesDueThisWeek: Number(work?.receivablesDueThisWeek ?? 0),
+        payablesDueThisWeek: Number(work?.payablesDueThisWeek ?? 0),
+        pendingApprovals: Number(work?.pendingApprovals ?? 0),
+        unmatchedBankLines: Number(work?.unmatchedBankLines ?? 0),
+        openTaxPeriods: Number(work?.openTaxPeriods ?? 0),
+        lowStockItems: Number(work?.lowStockItems ?? 0),
+        unfinishedPayroll: Number(work?.unfinishedPayroll ?? 0),
+        periodsToClose: Number(work?.periodsToClose ?? 0),
+      },
       monthly: monthlyRows.map((entry) => ({
         month: String(entry.month),
         sales: Number(entry.sales ?? 0),

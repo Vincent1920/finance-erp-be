@@ -1,8 +1,16 @@
+import type { RowDataPacket } from 'mysql2/promise'
 import { transaction } from '../config/database'
 import { InvoiceRepository, type PurchaseInvoiceWrite } from '../repositories/InvoiceRepository'
 import type { QueryExecutor } from '../types/database'
 import { ConflictError, NotFoundError, ValidationError } from '../utils/AppError'
-import { addDecimal, compareDecimal, divideDecimal } from '../utils/decimal'
+import {
+  addDecimal,
+  compareDecimal,
+  divideDecimal,
+  subtractDecimal,
+  percentageOf,
+  multiplyDecimal,
+} from '../utils/decimal'
 import type {
   PurchaseInvoiceInput,
   PurchaseInvoiceUpdateInput,
@@ -66,6 +74,7 @@ export class PurchaseInvoiceService {
       )
       if (duplicate) throw duplicateInvoiceError('purchase', input.supplier_invoice_number)
       const id = await this.repository.insertPurchase(connection, write)
+      await this.applyWithholding(connection, companyId, id, input)
       await this.log(connection, companyId, context, 'create', id, invoiceNumber, {
         status: 'draft',
         grandTotal: write.totals.grandTotal,
@@ -105,6 +114,7 @@ export class PurchaseInvoiceService {
       )
       if (!(await this.repository.updatePurchase(connection, id, input.version, write)))
         throw new ConflictError('Purchase invoice telah berubah; muat ulang sebelum menyimpan')
+      await this.applyWithholding(connection, companyId, id, input)
       await this.log(connection, companyId, context, 'update', id, String(current.invoice_number), {
         status: 'draft',
         version: input.version + 1,
@@ -186,6 +196,7 @@ export class PurchaseInvoiceService {
         throw new ValidationError('Akun utang supplier belum dikonfigurasi')
       const lines = await this.repository.purchaseLines(connection, id)
       const debits = new Map<number, string>()
+      const withholdingCredits = new Map<number, string>()
       const movementIds: number[] = []
       for (const line of lines) {
         this.addAccount(
@@ -201,6 +212,13 @@ export class PurchaseInvoiceService {
             String(line.base_tax_amount),
             'Akun pajak masukan belum dikonfigurasi',
           )
+        if (compareDecimal(String(line.base_withholding_amount ?? '0'), '0') > 0)
+          this.addAccount(
+            withholdingCredits,
+            Number(line.withholding_account_id),
+            String(line.base_withholding_amount),
+            'Akun utang PPh pada baris invoice belum dikonfigurasi',
+          )
         if (line.item_type === 'inventory') {
           if (!invoice.warehouse_id)
             throw new ValidationError('Gudang wajib diisi untuk invoice barang inventory')
@@ -209,8 +227,14 @@ export class PurchaseInvoiceService {
             itemId: Number(line.item_id),
             warehouseId: Number(invoice.warehouse_id),
             direction: 'in',
-            quantity: String(line.quantity),
-            unitCost: divideDecimal(String(line.base_subtotal), 2, String(line.quantity), 4, 6),
+            quantity: String(line.stock_quantity ?? line.quantity),
+            unitCost: divideDecimal(
+              String(line.base_subtotal),
+              2,
+              String(line.stock_quantity ?? line.quantity),
+              4,
+              6,
+            ),
             transactionType: 'purchase_invoice',
             transactionId: id,
             sourceLineId: Number(line.id),
@@ -235,6 +259,13 @@ export class PurchaseInvoiceService {
         debit: '0',
         credit: String(invoice.base_grand_total),
       })
+      for (const [accountId, amount] of withholdingCredits)
+        journals.push({
+          accountId,
+          description: 'PPh dipotong ' + invoice.invoice_number,
+          debit: '0',
+          credit: amount,
+        })
       const journalId = await this.posting.createPostedJournal(connection, {
         companyId,
         sourceType: 'purchase_invoice',
@@ -285,6 +316,12 @@ export class PurchaseInvoiceService {
         throw new ConflictError('Hanya purchase invoice Posted yang dapat direversal')
       if (compareDecimal(String(invoice.paid_amount), '0') > 0)
         throw new ConflictError('Invoice yang sudah dibayar tidak dapat direversal')
+      const [activeReturns] = await connection.execute<RowDataPacket[]>(
+        "SELECT id FROM purchase_returns WHERE purchase_invoice_id=? AND company_id=? AND status NOT IN ('cancelled','reversed') LIMIT 1",
+        [id, companyId],
+      )
+      if (activeReturns.length)
+        throw new ConflictError('Batalkan atau reversal retur terkait sebelum reversal invoice')
       const reversalJournalId = await this.posting.reversePostedJournal(connection, {
         companyId,
         journalId: Number(invoice.journal_id),
@@ -424,6 +461,88 @@ export class PurchaseInvoiceService {
     })
 
     return { id, invoiceNumber: parsed.invoiceNumber, status, totals: prepared.totals }
+  }
+
+  private async applyWithholding(
+    connection: QueryExecutor,
+    companyId: number,
+    id: number,
+    input: PurchaseInvoiceInput,
+  ) {
+    const invoice = await this.repository.findPurchase(connection, id, companyId, true)
+    if (!invoice) throw new NotFoundError('Invoice tidak ditemukan')
+    const lines = await this.repository.purchaseLines(connection, id)
+    const selectedTaxIds = [
+      ...new Set(
+        input.lines
+          .map((line) => line.withholding_tax_id)
+          .filter((value): value is number => Boolean(value)),
+      ),
+    ]
+    const taxes = new Map(
+      (await this.repository.findTaxCodes(connection, companyId, selectedTaxIds)).map((tax) => [
+        Number(tax.id),
+        tax,
+      ]),
+    )
+    let amount = '0.00',
+      base = '0.00'
+    const usedTaxIds = new Set<number>(),
+      usedAccountIds = new Set<number>()
+    for (const [index, line] of lines.entries()) {
+      const taxId = input.lines[index]?.withholding_tax_id ?? null
+      let lineAmount = '0.00',
+        lineBase = '0.00',
+        rate = '0.0000',
+        accountId: number | null = null
+      if (taxId) {
+        const tax = taxes.get(taxId)
+        if (!tax || tax.tax_type !== 'withholding' || !tax.output_tax_account_id)
+          throw new ValidationError(
+            `PPh pada baris ${index + 1} tidak aktif atau belum memiliki akun utang pajak`,
+          )
+        if (line.item_type === 'inventory')
+          throw new ValidationError(
+            `PPh jasa tidak boleh diterapkan pada barang persediaan di baris ${index + 1}`,
+          )
+        accountId = Number(tax.output_tax_account_id)
+        await this.validation.ensureActiveReference(connection, {
+          companyId,
+          table: 'accounts',
+          id: accountId,
+          label: 'Utang pajak',
+          postingOnly: true,
+        })
+        rate = String(tax.rate)
+        lineAmount = percentageOf(String(line.subtotal), tax.rate)
+        lineBase = multiplyDecimal(lineAmount, 2, input.exchange_rate, 8)
+        amount = addDecimal([amount, lineAmount])
+        base = addDecimal([base, lineBase])
+        usedTaxIds.add(taxId)
+        usedAccountIds.add(accountId)
+      }
+      await connection.execute(
+        'UPDATE purchase_invoice_lines SET withholding_tax_id=?,withholding_rate=?,withholding_amount=?,base_withholding_amount=?,withholding_account_id=? WHERE id=? AND purchase_invoice_id=?',
+        [taxId, rate, lineAmount, lineBase, accountId, line.id, id],
+      )
+    }
+    const net = subtractDecimal(String(invoice.grand_total), amount)
+    if (compareDecimal(net, '0') <= 0)
+      throw new ValidationError('Total bersih invoice harus lebih dari nol')
+    await connection.execute(
+      'UPDATE purchase_invoices SET withholding_tax_id=?,withholding_amount=?,base_withholding_amount=?,withholding_account_id=?,grand_total=?,base_grand_total=?,outstanding_amount=? WHERE id=? AND company_id=?',
+      [
+        usedTaxIds.size === 1 ? [...usedTaxIds][0] : null,
+        amount,
+        base,
+        usedAccountIds.size === 1 ? [...usedAccountIds][0] : null,
+        net,
+        subtractDecimal(String(invoice.base_grand_total), base),
+        net,
+        id,
+        companyId,
+      ],
+    )
   }
 
   private async prepare(

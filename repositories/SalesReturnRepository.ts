@@ -38,7 +38,7 @@ export class SalesReturnRepository {
   }
   async lines(connection: QueryExecutor, id: number) {
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT srl.*,i.sku item_code,i.name item_name,i.item_type,i.inventory_account_id,i.purchase_account_id,u.code unit_code,tc.output_tax_account_id FROM sales_return_lines srl INNER JOIN items i ON i.id=srl.item_id INNER JOIN units u ON u.id=srl.unit_id LEFT JOIN tax_codes tc ON tc.id=srl.tax_code_id WHERE srl.sales_return_id=? ORDER BY srl.line_number`,
+      `SELECT srl.*,i.sku item_code,i.name item_name,i.item_type,i.inventory_account_id,i.purchase_account_id,i.cogs_account_id,u.code unit_code,tc.output_tax_account_id FROM sales_return_lines srl INNER JOIN items i ON i.id=srl.item_id INNER JOIN units u ON u.id=srl.unit_id LEFT JOIN tax_codes tc ON tc.id=srl.tax_code_id WHERE srl.sales_return_id=? ORDER BY srl.line_number`,
       [id],
     )
     return rows
@@ -56,7 +56,7 @@ export class SalesReturnRepository {
   }
   async invoiceLines(connection: QueryExecutor, invoiceId: number) {
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT sil.*,i.item_type,i.inventory_account_id,i.purchase_account_id,tc.output_tax_account_id,COALESCE((SELECT SUM(srl.quantity) FROM sales_return_lines srl INNER JOIN sales_returns sr ON sr.id=srl.sales_return_id WHERE srl.sales_invoice_line_id=sil.id AND sr.status NOT IN ('rejected','reversed','cancelled')),0) reserved_return_quantity FROM sales_invoice_lines sil INNER JOIN items i ON i.id=sil.item_id LEFT JOIN tax_codes tc ON tc.id=sil.tax_code_id WHERE sil.sales_invoice_id=? ORDER BY sil.line_number`,
+      `SELECT sil.*,i.item_type,i.inventory_account_id,i.purchase_account_id,i.cogs_account_id,tc.output_tax_account_id,COALESCE((SELECT SUM(srl.quantity) FROM sales_return_lines srl INNER JOIN sales_returns sr ON sr.id=srl.sales_return_id WHERE srl.sales_invoice_line_id=sil.id AND sr.status NOT IN ('rejected','reversed','cancelled')),0) reserved_return_quantity FROM sales_invoice_lines sil INNER JOIN items i ON i.id=sil.item_id LEFT JOIN tax_codes tc ON tc.id=sil.tax_code_id WHERE sil.sales_invoice_id=? ORDER BY sil.line_number`,
       [invoiceId],
     )
     return rows
@@ -85,7 +85,7 @@ export class SalesReturnRepository {
     )
     for (const [i, l] of lines.entries())
       await connection.execute(
-        `INSERT INTO sales_return_lines(sales_return_id,sales_invoice_line_id,line_number,item_id,description,quantity,unit_id,unit_price,discount,tax_code_id,tax_rate,tax_amount,subtotal,base_subtotal,cogs_amount,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO sales_return_lines(sales_return_id,sales_invoice_line_id,line_number,item_id,description,quantity,stock_quantity,unit_id,unit_price,discount,tax_code_id,tax_rate,tax_amount,subtotal,base_subtotal,cogs_amount,reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           r.insertId,
           l.invoiceLineId,
@@ -93,6 +93,7 @@ export class SalesReturnRepository {
           l.itemId,
           l.description,
           l.quantity,
+          l.stockQuantity,
           l.unitId,
           l.unitPrice,
           l.discount,

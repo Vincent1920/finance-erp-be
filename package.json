@@ -11,6 +11,7 @@
     "migrate:rollback": "bun database/rollback.ts",
     "db:seed": "bun database/seed.ts",
     "db:seed:demo": "bun database/demo-seed.ts",
+    "db:seed:payroll": "bun database/payroll-demo.ts",
     "db:verify:demo": "bun database/demo-verify.ts",
     "db:verify-demo": "bun database/demo-verify.ts",
     "db:demo:imports": "bun database/generate-demo-imports.ts",
@@ -19,7 +20,8 @@
     "db:reset": "bun database/reset.ts",
     "test": "bun test",
     "format": "prettier --write \"**/*.{ts,json,md}\"",
-    "format:check": "prettier --check \"**/*.{ts,json,md}\""
+    "format:check": "prettier --check \"**/*.{ts,json,md}\"",
+    "db:verify:operations": "bun database/operational-verify.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

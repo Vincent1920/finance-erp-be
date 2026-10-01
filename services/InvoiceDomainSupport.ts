@@ -292,11 +292,6 @@ export async function prepareImportedInvoice(
       )
     }
     const unitId = line.unitId ?? Number(item.unit_id)
-    if (unitId !== Number(item.unit_id)) {
-      throw new ValidationError(
-        `Satuan pada baris ${index + 1} harus sama dengan satuan utama barang karena konversi satuan belum dikonfigurasi`,
-      )
-    }
     selectedUnitIds.push(unitId)
     if (line.taxCodeId) taxCodeIds.push(line.taxCodeId)
     if (item.item_type === 'inventory' && !warehouseId) {
@@ -304,11 +299,15 @@ export async function prepareImportedInvoice(
     }
   }
 
-  const [unitRows, taxRows] = await Promise.all([
+  const selections = input.lines.map((line) => ({ itemId: line.itemId, unitId: line.unitId ?? Number(items.get(line.itemId)!.unit_id) }))
+  const [unitRows, itemUnitRows, taxRows] = await Promise.all([
     repository.findUnits(connection, companyId, selectedUnitIds),
+    repository.findItemUnits(connection, companyId, selections),
     repository.findTaxCodes(connection, companyId, taxCodeIds),
   ])
   const units = new Set(unitRows.map((unit) => Number(unit.id)))
+  const itemUnits = new Map(itemUnitRows.map((unit) => [`${unit.item_id}:${unit.unit_id}`, String(unit.factor_to_stock)]))
+  for (const item of itemRows) itemUnits.set(`${item.id}:${item.unit_id}`, itemUnits.get(`${item.id}:${item.unit_id}`) ?? '1.000000')
   const taxes = new Map(taxRows.map((tax) => [Number(tax.id), tax]))
   const accountIds: number[] = []
 
@@ -325,11 +324,22 @@ export async function prepareImportedInvoice(
     if (!units.has(unitId)) {
       throw new NotFoundError(`Satuan pada baris ${index + 1} tidak ditemukan atau tidak aktif`)
     }
+    if (!itemUnits.has(`${line.itemId}:${unitId}`)) throw new ValidationError(`Satuan pada baris ${index + 1} belum dikonfigurasi untuk barang ini`)
     const fallbackAccount =
       kind === 'sales'
         ? item.sales_account_id
-        : (item.purchase_account_id ?? item.inventory_account_id)
+        : item.item_type === 'inventory'
+          ? item.inventory_account_id
+          : item.purchase_account_id
     const accountId = line.accountId ?? (fallbackAccount ? Number(fallbackAccount) : null)
+    if (
+      kind === 'purchase' &&
+      item.item_type === 'inventory' &&
+      accountId !== Number(item.inventory_account_id)
+    )
+      throw new ValidationError(
+        `Barang persediaan pada baris ${index + 1} harus menggunakan akun persediaannya`,
+      )
     if (!accountId) {
       throw new ValidationError(
         `${kind === 'sales' ? 'Akun pendapatan' : 'Akun pembelian/beban'} pada baris ${index + 1} belum dikonfigurasi`,
@@ -344,6 +354,10 @@ export async function prepareImportedInvoice(
           `Kode pajak pada baris ${index + 1} tidak ditemukan atau tidak aktif`,
         )
       }
+      if (tax.tax_type === 'withholding')
+        throw new ValidationError(
+          'Pajak potong harus dipilih pada bagian PPh potong invoice, bukan PPN baris',
+        )
       if (compareDecimal(tax.rate, '0', 4) > 0) {
         const taxAccount = kind === 'sales' ? tax.output_tax_account_id : tax.input_tax_account_id
         if (!taxAccount) {
@@ -387,7 +401,9 @@ export async function prepareImportedInvoice(
       Number(
         kind === 'sales'
           ? item.sales_account_id
-          : (item.purchase_account_id ?? item.inventory_account_id),
+          : item.item_type === 'inventory'
+            ? item.inventory_account_id
+            : item.purchase_account_id,
       )
     const calculated = calculatedLines[index]!
     return {
@@ -395,6 +411,7 @@ export async function prepareImportedInvoice(
       itemId: line.itemId,
       description: line.description,
       quantity: calculated.quantity,
+      stockQuantity: multiplyDecimal(calculated.quantity, 4, itemUnits.get(`${line.itemId}:${line.unitId ?? Number(item.unit_id)}`)!, 6, 4),
       unitId: line.unitId ?? Number(item.unit_id),
       unitPrice: calculated.unitPrice,
       discount: calculated.discount,

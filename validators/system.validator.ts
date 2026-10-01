@@ -72,11 +72,14 @@ export const settingsBulkSchema = z.object({ settings: z.array(settingEntrySchem
 export const companyProfileSchema = z.object({
   name: z.string().trim().min(2).max(150).optional(),
   legal_name: z.string().trim().max(191).nullable().optional(),
-  tax_number: z.string().trim().max(50).nullable().optional(),
+  tax_number: z.string().trim().regex(/^\d{16}$/, 'NPWP wajib tepat 16 digit angka').nullable().optional(),
   address: z.string().trim().max(5000).nullable().optional(),
   phone: z.string().trim().max(50).nullable().optional(),
   email: z.string().trim().email().max(191).nullable().optional(),
-  logo: z.string().trim().max(255).nullable().optional(),
+  logo: z.string().trim().max(750_000).refine(
+    (value) => !value || /^data:image\/(png|jpeg|webp);base64,/.test(value) || /^https?:\/\//.test(value) || value.startsWith('/'),
+    'Logo harus berupa gambar PNG/JPG/WebP atau URL yang valid',
+  ).nullable().optional(),
   base_currency: z.string().trim().length(3).transform((value) => value.toUpperCase()).optional(),
   fiscal_year_start: z.coerce.number().int().min(1).max(12).optional(),
 })

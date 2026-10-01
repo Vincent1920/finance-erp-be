@@ -26,6 +26,7 @@ export interface InvoiceItemRow extends RowDataPacket {
 export interface InvoiceTaxCodeRow extends RowDataPacket {
   id: number
   code: string
+  tax_type: string
   rate: string | number
   input_tax_account_id: number | null
   output_tax_account_id: number | null
@@ -62,6 +63,7 @@ export interface InvoiceLineWrite {
   itemId: number
   description?: string | null
   quantity: string
+  stockQuantity?: string
   unitId: number
   unitPrice: string
   discount: string
@@ -178,7 +180,15 @@ export class InvoiceRepository {
   }
   async purchaseLines(connection: QueryExecutor, id: number) {
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT pil.*,i.sku item_code,i.name item_name,i.item_type,i.inventory_account_id,i.purchase_account_id,u.code unit_code,tc.code tax_code,tc.input_tax_account_id FROM purchase_invoice_lines pil INNER JOIN items i ON i.id=pil.item_id INNER JOIN units u ON u.id=pil.unit_id LEFT JOIN tax_codes tc ON tc.id=pil.tax_code_id WHERE pil.purchase_invoice_id=? ORDER BY pil.line_number`,
+      `SELECT pil.*,i.sku item_code,i.name item_name,i.item_type,i.inventory_account_id,i.purchase_account_id,
+        u.code unit_code,tc.code tax_code,tc.input_tax_account_id,
+        wtc.code withholding_tax_code,wtc.name withholding_tax_name,wtc.reporting_type withholding_reporting_type
+       FROM purchase_invoice_lines pil
+       INNER JOIN items i ON i.id=pil.item_id
+       INNER JOIN units u ON u.id=pil.unit_id
+       LEFT JOIN tax_codes tc ON tc.id=pil.tax_code_id
+       LEFT JOIN tax_codes wtc ON wtc.id=pil.withholding_tax_id
+       WHERE pil.purchase_invoice_id=? ORDER BY pil.line_number`,
       [id],
     )
     return rows
@@ -315,7 +325,7 @@ export class InvoiceRepository {
 
   async salesLines(connection: QueryExecutor, id: number) {
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT sil.*, i.sku AS item_code, i.name AS item_name, i.item_type, i.inventory_account_id, i.purchase_account_id, u.code AS unit_code, tc.code AS tax_code, tc.output_tax_account_id FROM sales_invoice_lines sil INNER JOIN items i ON i.id = sil.item_id INNER JOIN units u ON u.id = sil.unit_id LEFT JOIN tax_codes tc ON tc.id = sil.tax_code_id WHERE sil.sales_invoice_id = ? ORDER BY sil.line_number`,
+      `SELECT sil.*, i.sku AS item_code, i.name AS item_name, i.item_type, i.inventory_account_id, i.purchase_account_id, i.cogs_account_id, u.code AS unit_code, tc.code AS tax_code, tc.output_tax_account_id FROM sales_invoice_lines sil INNER JOIN items i ON i.id = sil.item_id INNER JOIN units u ON u.id = sil.unit_id LEFT JOIN tax_codes tc ON tc.id = sil.tax_code_id WHERE sil.sales_invoice_id = ? ORDER BY sil.line_number`,
       [id],
     )
     return rows
@@ -469,11 +479,26 @@ export class InvoiceRepository {
     return rows
   }
 
+  async findItemUnits(
+    connection: QueryExecutor,
+    companyId: number,
+    selections: ReadonlyArray<{ itemId: number; unitId: number }>,
+  ) {
+    if (!selections.length) return []
+    const clauses = selections.map(() => '(item_id=? AND unit_id=?)').join(' OR ')
+    const values = selections.flatMap((selection) => [selection.itemId, selection.unitId])
+    const [rows] = await connection.execute<RowDataPacket[]>(
+      `SELECT item_id,unit_id,factor_to_stock FROM item_units WHERE company_id=? AND is_active=TRUE AND (${clauses})`,
+      [companyId, ...values],
+    )
+    return rows
+  }
+
   async findTaxCodes(connection: QueryExecutor, companyId: number, taxCodeIds: readonly number[]) {
     const ids = uniqueIds(taxCodeIds)
     if (ids.length === 0) return []
     const [rows] = await connection.execute<InvoiceTaxCodeRow[]>(
-      `SELECT id, code, rate, input_tax_account_id, output_tax_account_id
+      `SELECT id, code, tax_type, rate, input_tax_account_id, output_tax_account_id
        FROM tax_codes
        WHERE company_id = ? AND id IN (${placeholders(ids)}) AND is_active = TRUE`,
       [companyId, ...ids],
@@ -623,16 +648,17 @@ export class InvoiceRepository {
     for (const line of lines) {
       await connection.execute(
         `INSERT INTO sales_invoice_lines (
-           sales_invoice_id, line_number, item_id, description, quantity, unit_id,
+           sales_invoice_id, line_number, item_id, description, quantity, stock_quantity, unit_id,
            unit_price, discount, discount_percent, tax_code_id, tax_rate, tax_amount,
            subtotal, base_subtotal, base_tax_amount, cogs_amount, revenue_account_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
         [
           invoiceId,
           line.lineNumber,
           line.itemId,
           line.description ?? null,
           line.quantity,
+          line.stockQuantity ?? line.quantity,
           line.unitId,
           line.unitPrice,
           line.discount,
@@ -657,16 +683,17 @@ export class InvoiceRepository {
     for (const line of lines) {
       await connection.execute(
         `INSERT INTO purchase_invoice_lines (
-           purchase_invoice_id, line_number, item_id, description, quantity, unit_id,
+           purchase_invoice_id, line_number, item_id, description, quantity, stock_quantity, unit_id,
            unit_price, discount, discount_percent, tax_code_id, tax_rate, tax_amount,
            subtotal, base_subtotal, base_tax_amount, expense_account_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           invoiceId,
           line.lineNumber,
           line.itemId,
           line.description ?? null,
           line.quantity,
+          line.stockQuantity ?? line.quantity,
           line.unitId,
           line.unitPrice,
           line.discount,
