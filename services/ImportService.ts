@@ -36,6 +36,7 @@ import {
   createErrorReport,
   createImportTemplate,
   parseImportFile,
+  parseMappedBankFile,
   type ImportFileLike,
   type ParsedImportRow,
 } from './import/TabularFileService'
@@ -129,9 +130,31 @@ export class ImportService {
     return createImportTemplate(type, format)
   }
 
-  async preview(actor: ImportActor, type: ImportType, file: ImportFileLike) {
+  async preview(actor: ImportActor, type: ImportType, file: ImportFileLike, mappingId?: number) {
     this.assertPermission(actor, type)
-    const { parsed, buffer } = await parseImportFile(file, type)
+    let parsedFile
+    if (type === 'bank_statement' && mappingId) {
+      const [rows] = await db.execute<any[]>(
+        `SELECT m.*,b.code bank_account_code FROM bank_import_mappings m
+          JOIN bank_accounts b ON b.id=m.bank_account_id AND b.company_id=m.company_id
+         WHERE m.id=? AND m.company_id=? AND m.is_active=1`,
+        [mappingId, actor.companyId],
+      )
+      const mapping = rows[0]
+      if (!mapping) throw new NotFoundError('Format impor bank tidak ditemukan atau belum memiliki rekening')
+      parsedFile = await parseMappedBankFile(
+        file,
+        {
+          delimiter: mapping.delimiter,
+          date_format: mapping.date_format,
+          decimal_separator: mapping.decimal_separator,
+          header_row: Number(mapping.header_row),
+          column_mapping: typeof mapping.column_mapping === 'string' ? JSON.parse(mapping.column_mapping) : mapping.column_mapping,
+        },
+        mapping.bank_account_code,
+      )
+    } else parsedFile = await parseImportFile(file, type)
+    const { parsed, buffer } = parsedFile
     const checksum = createHash('sha256').update(buffer).digest('hex')
     const fileName = file.name.replace(/[\\/\u0000-\u001F]/g, '_').slice(0, 255)
     const importNumber = `IMP-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${randomUUID().slice(0, 8).toUpperCase()}`

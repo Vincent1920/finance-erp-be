@@ -1,7 +1,7 @@
 import type { ResultSetHeader, RowDataPacket } from 'mysql2/promise'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { resolve,relative,isAbsolute,sep } from 'node:path'
 import { db, transaction } from '../config/database'
 import { env } from '../config/env'
 import { ConflictError, NotFoundError, ValidationError } from '../utils/AppError'
@@ -25,11 +25,19 @@ const encode = (_key: string, value: unknown) =>
     ? value.toString()
     : Buffer.isBuffer(value)
       ? { __buffer: value.toString('base64') }
-      : value
+      : value && typeof value==='object' && 'type' in value && value.type==='Buffer' && 'data' in value && Array.isArray(value.data) ? {__buffer:Buffer.from(value.data).toString('base64')} : value
 const decode = (_key: string, value: unknown) =>
   value && typeof value === 'object' && '__buffer' in value
     ? Buffer.from(String((value as { __buffer: unknown }).__buffer), 'base64')
     : value
+
+export function restoreDatabaseValue(value:unknown,type:string):unknown {
+ if(value==null)return value
+ if(['date','datetime','timestamp'].includes(type)&&typeof value==='string'&&/^\d{4}-\d{2}-\d{2}T/.test(value)){const date=new Date(value);if(!Number.isFinite(date.getTime()))throw new ValidationError('Tanggal backup tidak valid');return date}
+ if(['blob','tinyblob','mediumblob','longblob','binary','varbinary','bit'].includes(type)&&value&&typeof value==='object'&&'type' in value&&value.type==='Buffer'&&'data' in value&&Array.isArray(value.data))return Buffer.from(value.data)
+ if(type==='json'&&typeof value==='object'&&!Buffer.isBuffer(value))return JSON.stringify(value)
+ return value
+}
 
 export function validateBackupDocument(
   document: unknown,
@@ -81,7 +89,7 @@ export class BackupService {
       )
       const directory = resolve(process.cwd(), 'storage', 'backups')
       await mkdir(directory, { recursive: true })
-      const fileName = `${number}.json`,
+      const fileName = `${companyId}-${number}-${crypto.randomUUID()}.json`,
         path = resolve(directory, fileName)
       const [created] = await connection.execute<ResultSetHeader>(
         `INSERT INTO backup_jobs(company_id,backup_number,type,status,storage_disk,storage_path,file_name,requested_by,started_at) VALUES(?,?,?,'running','local',?,?,?,NOW())`,
@@ -160,8 +168,8 @@ export class BackupService {
     if (!backup) throw new NotFoundError('Berkas backup tidak ditemukan')
     const path = resolve(String(backup.storage_path)),
       root = resolve(process.cwd(), 'storage', 'backups')
-    if (!path.startsWith(`${root}\\`) && path !== root)
-      throw new ValidationError('Lokasi backup tidak valid')
+    const actual=await realpath(path),actualRoot=await realpath(root),child=relative(actualRoot,actual)
+    if(!child||child==='..'||child.startsWith('..'+sep)||isAbsolute(child))throw new ValidationError('Lokasi backup tidak valid')
     return { backup, path }
   }
 
@@ -217,6 +225,8 @@ export class BackupService {
         for (const name of Object.keys(document.tables))
           await connection.query(`DELETE FROM ${safeName(name)}`)
       }
+      const [columnRows]=await connection.query<RowDataPacket[]>('SELECT TABLE_NAME table_name,COLUMN_NAME column_name,DATA_TYPE data_type FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=?',[env.DB_NAME])
+      const columnTypes=new Map(columnRows.map(c=>[`${c.table_name}.${c.column_name}`,String(c.data_type)]))
       if (document.type !== 'schema')
         for (const [name, table] of Object.entries(document.tables)) {
           for (const row of table.rows ?? []) {
@@ -224,11 +234,13 @@ export class BackupService {
             if (!columns.length) continue
             await connection.execute(
               `INSERT INTO ${safeName(name)}(${columns.map(safeName).join(',')}) VALUES(${columns.map(() => '?').join(',')})`,
-              columns.map((column) => row[column] as never),
+              columns.map((column) => restoreDatabaseValue(row[column],columnTypes.get(name+'.'+column)??'') as never),
             )
           }
         }
       await connection.query('SET FOREIGN_KEY_CHECKS=1')
+      await connection.execute('UPDATE auth_sessions SET revoked_at=UTC_TIMESTAMP(3) WHERE revoked_at IS NULL')
+      await connection.execute("UPDATE backup_jobs SET status='completed',checksum=?,file_size=?,completed_at=NOW() WHERE id=?",[checksum,Buffer.byteLength(content),backupId])
       await connection.execute(
         `INSERT INTO restore_jobs(company_id,restore_number,backup_job_id,storage_disk,storage_path,checksum,status,validation_result,requested_by,approved_by,approved_at,started_at,completed_at)
         VALUES(?,?,?,'local',?,?,'completed',?,?,?,NOW(),NOW(),NOW()) ON DUPLICATE KEY UPDATE status='completed',completed_at=NOW()`,

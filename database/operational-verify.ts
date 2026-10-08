@@ -18,6 +18,7 @@ await admin.query(`CREATE DATABASE \`${schema}\` CHARACTER SET utf8mb4 COLLATE u
 process.env.DB_NAME = schema
 const { db, transaction } = await import('../config/database')
 let checks = 0
+let testBackupPath:string|undefined
 function check(value: unknown, message: string) {
   assert.ok(value, message)
   checks++
@@ -35,11 +36,20 @@ async function rejects(work: () => Promise<unknown>, message: string) {
 const key = () => crypto.randomUUID()
 try {
   const { migrations } = await import('./migrations')
-  for (const migration of migrations) await migration.up(db)
+  await db.query('CREATE TABLE IF NOT EXISTS migrations(id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,name VARCHAR(191) NOT NULL UNIQUE,run_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB')
+  for (const migration of migrations){await migration.up(db);await db.execute('INSERT INTO migrations(name) VALUES(?)',[migration.name])}
   const { seedCore } = await import('./seeds/core.seed')
   await transaction((c) => seedCore(c))
-  const [users] = await db.query<any[]>('SELECT id FROM users ORDER BY id LIMIT 1'),
+  const [users] = await db.query<any[]>('SELECT id,password FROM users ORDER BY id LIMIT 1'),
     actor = { userId: Number(users[0].id), requestId: 'operational-verify' }
+  const approverId = await (async () => {
+    const [result] = await db.execute<any>(
+      "INSERT INTO users(company_id,name,email,password,status) VALUES(1,'Operational Approver','approver@verify.local',?,'active')",
+      [users[0].password],
+    )
+    return Number(result.insertId)
+  })()
+  const approver = { userId: approverId, requestId: 'operational-verify-approver' }
   const ids: Record<string, number> = {}
   for (const [code, name, type, normal] of [
     ['1101', 'Cash', 'asset', 'debit'],
@@ -64,6 +74,9 @@ try {
     )
     ids[code!] = r.insertId
   }
+  const { AccountMappingService } = await import('../services/AccountMappingService')
+  const setupMappings=new AccountMappingService()
+  for(const [key,code] of Object.entries({AR_CONTROL:'1130',AP_CONTROL:'2101',INVENTORY:'1140',COGS:'5100',REVENUE:'4100',PURCHASE_EXPENSE:'6100',INPUT_VAT:'1150',OUTPUT_VAT:'2201',WITHHOLDING_TAX:'2202'})) await setupMappings.upsert({id:actor.userId,companyId:1,roles:['super-admin']},setupMappings.assertKey(key),ids[code]!)
   const insert = async (sql: string, values: any[] = []) =>
     Number((await db.execute<any>(sql, values))[0].insertId)
   const unit = await insert(
@@ -106,6 +119,13 @@ try {
   const { PurchaseInvoiceService } = await import('../services/PurchaseInvoiceService'),
     purchase = new PurchaseInvoiceService()
   const { purchaseInvoiceSchema } = await import('../validators/purchase-invoice.validator')
+  const stressItem = await insert(
+    "INSERT INTO items(company_id,sku,name,item_type,unit_id,sales_account_id,inventory_account_id,cogs_account_id,purchase_account_id,sales_price,purchase_price) VALUES(1,'STRESS-INV','Inventory valuation stress','inventory',?,?,?,?,?,1000,100)",
+    [unit, ids['4100'], ids['1140'], ids['5100'], ids['6100']],
+  )
+  const { inventoryStress } = await import('./inventory-stress')
+  const { verifyFifo } = await import('./fifo-verify')
+  await verifyFifo({item:stressItem,warehouse,warehouse2,supplier,customer,unit,inventoryAccount:ids['1140']!,actor,approver})
   const pi = await purchase.create(
     1,
     purchaseInvoiceSchema.parse({
@@ -128,7 +148,7 @@ try {
     actor,
   )
   await purchase.submit(pi.id, 1, actor)
-  await purchase.approve(pi.id, 1, actor)
+  await purchase.approve(pi.id, 1, approver)
   await purchase.post(pi.id, 1, actor)
   const invoice: any = await purchase.get(pi.id, 1)
   check(
@@ -333,7 +353,7 @@ try {
     actor,
   )
   await sales.submit(si.id, 1, actor)
-  await sales.approve(si.id, 1, actor)
+  await sales.approve(si.id, 1, approver)
   await sales.post(si.id, 1, actor)
   for (const amount of ['100.00', '122.00'])
     await settlements.post(
@@ -363,7 +383,7 @@ try {
       actor,
     )
     await sales.submit(created.id, 1, actor)
-    await sales.approve(created.id, 1, actor)
+    await sales.approve(created.id, 1, approver)
     await sales.post(created.id, 1, actor)
     multiInvoices.push(created.id)
   }
@@ -397,7 +417,7 @@ try {
     {
       request_key: key(),
       invoice_id: pi.id,
-      date: '2026-01-10',
+      date: '2026-01-13',
       reference: 'RET-CREDIT',
       reason: 'Return after invoice was fully paid',
       return_stock: true,
@@ -417,7 +437,7 @@ try {
     1,
     purchaseInvoiceSchema.parse({
       supplier_invoice_number: 'TEST-PI-2',
-      invoice_date: '2026-01-10',
+      invoice_date: '2026-01-13',
       due_date: '2026-02-10',
       supplier_id: supplier,
       warehouse_id: warehouse,
@@ -426,14 +446,14 @@ try {
     actor,
   )
   await purchase.submit(pi2.id, 1, actor)
-  await purchase.approve(pi2.id, 1, actor)
+  await purchase.approve(pi2.id, 1, approver)
   await purchase.post(pi2.id, 1, actor)
   const applied = await creditService.apply(
     1,
     false,
     {
       request_key: key(),
-      date: '2026-01-10',
+      date: '2026-01-13',
       reference: 'APPLY-CREDIT',
       credit_id: Number(supplierCredits[0].id),
       invoice_id: pi2.id,
@@ -448,7 +468,7 @@ try {
   await creditService.reverse(
     1,
     applied.id,
-    { request_key: key(), date: '2026-01-11', reason: 'Reverse credit application' },
+    { request_key: key(), date: '2026-01-13', reason: 'Reverse credit application' },
     actor,
   )
   check(
@@ -460,7 +480,7 @@ try {
     false,
     {
       request_key: key(),
-      date: '2026-01-11',
+      date: '2026-01-13',
       reference: 'SUPPLIER-REFUND',
       credit_id: Number(supplierCredits[0].id),
       cash_account_id: ids['1102']!,
@@ -472,7 +492,7 @@ try {
   await creditService.reverse(
     1,
     refund.id,
-    { request_key: key(), date: '2026-01-12', reason: 'Reverse supplier refund' },
+    { request_key: key(), date: '2026-01-13', reason: 'Reverse supplier refund' },
     actor,
   )
   await returns.reverse(
@@ -480,7 +500,7 @@ try {
     creditReturn.id,
     {
       request_key: key(),
-      date: '2026-01-12',
+      date: '2026-01-13',
       reason: 'Reverse paid return after clearing credit use',
     },
     actor,
@@ -774,19 +794,20 @@ try {
     actor,
   )
   const autoTax: any = await taxReconciliation.overview(1, '2026-01', 'all')
-  const autoDocument = autoTax.rows.find(
+  const automaticTaxRows = autoTax.rows.filter(
     (row: any) => row.source_key && !row.source_key.startsWith('INTERNAL-'),
   )
-  await taxReconciliation.linkDocument(
-    1,
-    {
-      source_key: autoDocument.source_key,
-      tax_document_number: 'TAX-DOC-TEST-001',
-      tax_document_date: '2026-01-31',
-      notes: 'Document matching verification',
-    },
-    actor,
-  )
+  for (const [index, row] of automaticTaxRows.entries())
+    await taxReconciliation.linkDocument(
+      1,
+      {
+        source_key: row.source_key,
+        tax_document_number: `TAX-DOC-TEST-${String(index + 1).padStart(3, '0')}`,
+        tax_document_date: row.document_date || '2026-01-31',
+        notes: 'Document matching verification',
+      },
+      actor,
+    )
   const taxBefore: any = await taxReconciliation.overview(1, '2026-01', 'all')
   const reportedRows = taxBefore.rows.map((row: any, index: number) => ({
     tax_type: row.tax_type,
@@ -833,7 +854,7 @@ try {
     1,
     {
       period: '2026-01',
-      revision: 1,
+      revision: 0,
       source_file: 'verification-revision.csv',
       notes: 'Revision verification',
       rows: reportedRows,
@@ -875,26 +896,687 @@ try {
       ),
     'Locked tax period rejects replacement imports',
   )
+  await rejects(
+    () =>
+      taxReconciliation.linkDocument(
+        1,
+        {
+          source_key: matchedTax.system_rows[0].source_key,
+          tax_document_number: 'LOCK-CHANGE',
+          tax_document_date: '2026-01-03',
+          notes: 'Should be blocked',
+        },
+        actor,
+      ),
+    'Locked tax period rejects document relinking',
+  )
+  check(
+    (await taxReconciliation.overview(1, '2026-01', 'all')).versions.length === 1,
+    'Replacement import retains prior SPT snapshot',
+  )
+  await taxReconciliation.amend(
+    1,
+    '2026-01',
+    'Correction supported by replacement documents',
+    actor,
+  )
+  const amendment = await taxReconciliation.overview(1, '2026-01', 'all')
+  check(
+    amendment.period.revision === 1 &&
+      amendment.imported_rows.length === 0 &&
+      amendment.versions.length === 2,
+    'Amendment opens a new revision without presenting old rows as new SPT',
+  )
+  await rejects(
+    () => taxReconciliation.setStatus(1, '2026-01', 'locked', actor),
+    'A new amendment cannot lock before its SPT is imported',
+  )
+  reportedRows[0].tax_amount = Number(reportedRows[0].tax_amount) - 10
+  await taxReconciliation.importReport(
+    1,
+    {
+      period: '2026-01',
+      revision: 1,
+      source_file: 'amendment.csv',
+      notes: 'Corrected SPT documents',
+      rows: reportedRows,
+    },
+    actor,
+  )
+  const { PostingService } = await import('../services/PostingService'),
+    posting = new PostingService()
+  let verificationJournalId = 0
+  async function post(lines: any[], date = '2026-04-01', sourceType = 'verification') {
+    return transaction((c) =>
+      posting.createPostedJournal(c, {
+        companyId: 1,
+        sourceType,
+        sourceId: ++verificationJournalId,
+        date,
+        description: 'Verification journal',
+        lines,
+        context: actor,
+      }),
+    )
+  }
+  const taxPaymentJournal = await post([
+    { accountId: ids['2201'], debit: '100', credit: '0' },
+    { accountId: ids['1102'], debit: '0', credit: '100' },
+  ])
+  const evidence = {
+    period: '2026-01',
+    tax_group: 'ppn' as const,
+    date: '2026-04-01',
+    ntpn: 'TESTNTPN00000001',
+    journal_id: taxPaymentJournal,
+    account_id: ids['2201']!,
+    amount: 100,
+    notes: 'Tax payment verification',
+  }
+  await taxReconciliation.payment(1, evidence, actor)
+  await rejects(
+    () => taxReconciliation.payment(1, evidence, actor),
+    'Duplicate NTPN cannot allocate a payment twice',
+  )
+  await rejects(
+    () => taxReconciliation.payment(1, { ...evidence, ntpn: 'TESTNTPN00000002', amount: 1 }, actor),
+    'Tax evidence cannot exceed the payment journal',
+  )
+  await rejects(
+    () =>
+      taxReconciliation.payment(
+        1,
+        { ...evidence, tax_group: 'unification', ntpn: 'TESTNTPN00000003' },
+        actor,
+      ),
+    'Tax payment account must match the tax group',
+  )
+  check(
+    Number(
+      (await taxReconciliation.overview(1, '2026-01', 'all')).payment_summary.ppn.linked_payment,
+    ) === 100,
+    'SPT-to-payment summary includes posted evidence',
+  )
+  await posting.reverseManual({
+    companyId: 1,
+    journalId: taxPaymentJournal,
+    date: '2026-04-02',
+    reason: 'Invalid payment correction',
+    context: actor,
+  })
+  check(
+    Number(
+      (await taxReconciliation.overview(1, '2026-01', 'all')).payment_summary.ppn.linked_payment,
+    ) === 0,
+    'Reversed payment evidence is excluded from paid totals',
+  )
+  const foreignAccount = await insert(
+    "INSERT INTO accounts(company_id,code,name,account_type,normal_balance,is_posting,is_header,is_active) VALUES(1,'1104','USD Bank','asset','debit',1,0,1)",
+  )
+  const gain = await insert(
+    "INSERT INTO accounts(company_id,code,name,account_type,normal_balance,is_posting,is_header,is_active) VALUES(1,'7101','FX Gain','other_income','credit',1,0,1)",
+  )
+  const loss = await insert(
+    "INSERT INTO accounts(company_id,code,name,account_type,normal_balance,is_posting,is_header,is_active) VALUES(1,'8101','FX Loss','other_expense','debit',1,0,1)",
+  )
+  await db.execute(
+    "INSERT INTO account_mappings(company_id,mapping_key,account_id) VALUES(1,'FX_GAIN',?),(1,'FX_LOSS',?)",
+    [gain, loss],
+  )
+  const usdBank = await insert(
+    "INSERT INTO bank_accounts(company_id,code,bank_name,account_number,account_name,currency,gl_account_id,created_by) VALUES(1,'USD','USD Bank','456','Test USD','USD',?,?)",
+    [foreignAccount, actor.userId],
+  )
+  await rejects(()=>post([{accountId:foreignAccount,debit:'15000',credit:'0'},{accountId:ids['3100'],debit:'0',credit:'15000'}]),'Direct foreign bank posting without native currency details is rejected')
+  await post(
+    [
+      { accountId: ids['1102'], debit: '50000000', credit: '0' },
+      { accountId: ids['3100'], debit: '0', credit: '50000000' },
+    ],
+    '2026-04-03',
+  )
+  const { CurrencyService } = await import('../services/CurrencyService'),
+    currency = new CurrencyService()
+  const fxTransfer = {
+    request_key: key(),
+    date: '2026-04-04',
+    from_bank_id: bank,
+    to_bank_id: usdBank,
+    from_amount: '15000000',
+    to_amount: '1000',
+    target_rate: 15000,
+    fee_amount: '0',
+    reference: 'FX-TRANSFER',
+  }
+  const transfer = await currency.transfer(1, fxTransfer, actor)
+  check(
+    (await currency.transfer(1, fxTransfer, actor)).id === transfer.id,
+    'FX transfer retry returns the same journal',
+  )
+  const before = await currency.overview(1, '2026-04-04'),
+    position = before.banks.find((b: any) => b.id === usdBank)!
+  check(
+    Number(position.native_balance) === 1000 && Number(position.base_balance) === 15000000,
+    'FX bank separates native USD and carrying rupiah balances',
+  )
+  const valuation = {
+    request_key: key(),
+    date: '2026-04-05',
+    bank_id: usdBank,
+    rate: 16000,
+    reference: 'CLOSING-RATE',
+  }
+  const preview = await currency.revalue(1, valuation, actor, true)
+  check(
+    Number(preview.difference) === 1000000,
+    'Revaluation preview computes unrealized exchange gain',
+  )
+  await currency.revalue(1, valuation, actor)
+  const usdBook = await banking.cash(1, {
+    date_from: '2026-04-01',
+    date_to: '2026-04-05',
+    bank_account_id: usdBank,
+  })
+  check(
+    Number(usdBook.summary.closing) === 1000 && Number(usdBook.summary.inflow) === 1000,
+    'Native bank cash book does not count revaluation as cash',
+  )
+  await rejects(
+    () => currency.revalue(1, { ...valuation, request_key: key() }, actor),
+    'Repeated valuation at the same rate cannot double-post a gain',
+  )
+  await rejects(
+    () => currency.transfer(1, { ...fxTransfer, request_key: key(), date: '2026-04-04' }, actor),
+    'Backdated foreign transfer is blocked after a later valuation',
+  )
+  const [operations] = await db.query<any[]>(
+    'SELECT id,journal_id FROM currency_bank_operations ORDER BY id DESC LIMIT 1',
+  )
+  await rejects(
+    () =>
+      posting.reverseManual({
+        companyId: 1,
+        journalId: operations[0].journal_id,
+        date: '2026-04-05',
+        reason: 'Must use source module',
+        context: actor,
+      }),
+    'Generic journal reversal cannot bypass FX bank controls',
+  )
+  await currency.reverse(
+    1,
+    operations[0].id,
+    { request_key: key(), date: '2026-04-05', reason: 'Reverse closing valuation' },
+    actor,
+  )
+  check(
+    Number(
+      (await currency.overview(1, '2026-04-05')).banks.find((b: any) => b.id === usdBank)!
+        .base_balance,
+    ) === 15000000,
+    'Source reversal restores foreign carrying value',
+  )
+  const usdCustomer = await insert(
+    "INSERT INTO customers(company_id,code,name,currency,tax_number,receivable_account_id) VALUES(1,'USD-CUSTOMER','USD Customer','USD','0123456789012345',?)",
+    [ids['1130']],
+  )
+  await db.execute('UPDATE items SET sales_account_id=? WHERE id=?', [ids['4100'], shippingItem])
+  const usdInvoice = await sales.create(
+    1,
+    salesInvoiceSchema.parse({
+      invoice_date: '2026-04-06',
+      due_date: '2026-05-06',
+      customer_id: usdCustomer,
+      currency: 'USD',
+      exchange_rate: 15000,
+      lines: [
+        {
+          item_id: shippingItem,
+          quantity: 1,
+          unit_id: unit,
+          unit_price: 100,
+          sales_account_id: ids['4100'],
+        },
+      ],
+    }),
+    actor,
+  )
+  await sales.submit(usdInvoice.id, 1, actor)
+  await sales.approve(usdInvoice.id, 1, approver)
+  await sales.post(usdInvoice.id, 1, actor)
+  const { settlementSchema } = await import('../validators/operations.validator')
+  const fxPayment = await settlements.post(
+    1,
+    true,
+    settlementSchema.parse({
+      request_key: key(),
+      date: '2026-04-07',
+      bank_account_id: usdBank,
+      cash_account_id: foreignAccount,
+      exchange_rate: 16000,
+      payment_method: 'bank_transfer',
+      allocations: [{ invoice_id: usdInvoice.id, amount: '100' }],
+    }),
+    actor,
+  )
+  const [fxRows] = await db.execute<any[]>('SELECT fx_amount FROM customer_payments WHERE id=?', [
+    fxPayment.id,
+  ])
+  check(
+    Number(fxRows[0].fx_amount) === 100000,
+    'Foreign invoice settlement recognizes the difference from its historical rate',
+  )
+  const [paidFx] = await db.execute<any[]>(
+    'SELECT outstanding_amount FROM sales_invoices WHERE id=?',
+    [usdInvoice.id],
+  )
+  check(
+    Number(paidFx[0].outstanding_amount) === 0,
+    'FX gain does not change the invoice allocation amount',
+  )
+  await banking.create(
+    1,
+    {
+      request_key: key(),
+      bank_account_id: usdBank,
+      number: 'USD-STATEMENT',
+      date_from: '2026-04-04',
+      date_to: '2026-04-07',
+      opening_balance: 0,
+      closing_balance: 1100,
+      lines: [
+        {
+          date: '2026-04-04',
+          description: 'Currency transfer',
+          reference: 'FX-TRANSFER',
+          debit: '0',
+          credit: '1000',
+          balance: 1000,
+        },
+        {
+          date: '2026-04-07',
+          description: 'Customer receipt',
+          reference: fxPayment.number,
+          debit: '0',
+          credit: '100',
+          balance: 1100,
+        },
+      ],
+    },
+    actor,
+  )
+  const nativeSuggestions = await banking.suggestions(1, {
+    bank_account_id: usdBank,
+    date_from: '2026-04-04',
+    date_to: '2026-04-07',
+  })
+  check(
+    nativeSuggestions.length === 2,
+    'Foreign bank suggestions compare USD statement movements against native journal amounts',
+  )
+  for (const suggestion of nativeSuggestions as any[])
+    await banking.match(
+      1,
+      {
+        request_key: key(),
+        statement_line_id: Number(suggestion.statement_line_id),
+        journal_line_id: Number(suggestion.journal_line_id),
+      },
+      actor,
+    )
+  const [nativeRecon] = await db.query<any[]>(
+    'SELECT difference,status FROM bank_reconciliations WHERE bank_account_id=?',
+    [usdBank],
+  )
+  check(
+    Number(nativeRecon[0].difference) === 0 && nativeRecon[0].status === 'completed',
+    'Foreign bank reconciliation completes without treating revaluation as cash',
+  )
+  const nativeControls = await reports.subledger(1, '2026-04-07')
+  const nativeControl = nativeControls.find((r) => r.accountId === foreignAccount)!
+  check(
+    Number(nativeControl.generalLedger) === 16600000 &&
+      Number(nativeControl.subledger) === 16600000,
+    'Foreign bank control report compares bank evidence and GL in the same base currency',
+  )
+  const usdSupplier = await insert(
+    "INSERT INTO suppliers(company_id,code,name,currency,tax_number,payable_account_id) VALUES(1,'USD-SUPPLIER','USD Supplier','USD','0123456789012345',?)",
+    [ids['2101']],
+  )
+  const usdPurchase = await purchase.create(
+    1,
+    purchaseInvoiceSchema.parse({
+      supplier_invoice_number: 'USD-PI',
+      invoice_date: '2026-04-08',
+      due_date: '2026-05-08',
+      supplier_id: usdSupplier,
+      currency: 'USD',
+      exchange_rate: 15000,
+      lines: [{ item_id: shippingItem, quantity: 1, unit_id: unit, unit_price: 100 }],
+    }),
+    actor,
+  )
+  await purchase.submit(usdPurchase.id, 1, actor)
+  await purchase.approve(usdPurchase.id, 1, approver)
+  await purchase.post(usdPurchase.id, 1, actor)
+  const usdPayout = await settlements.post(
+    1,
+    false,
+    settlementSchema.parse({
+      request_key: key(),
+      date: '2026-04-09',
+      bank_account_id: usdBank,
+      cash_account_id: foreignAccount,
+      exchange_rate: 17000,
+      allocations: [{ invoice_id: usdPurchase.id, amount: '100' }],
+    }),
+    actor,
+  )
+  const afterPayout = await currency.overview(1, '2026-04-09'),
+    cashAfter = afterPayout.banks.find((b: any) => b.id === usdBank)!
+  check(
+    Number(cashAfter.native_balance) === 1000 && Number(cashAfter.base_balance) === 15090909.09,
+    'Foreign purchase payment removes cash at its carrying value and preserves the residual balance',
+  )
+  await settlements.reverse(
+    1,
+    false,
+    usdPayout.id,
+    { request_key: key(), date: '2026-04-09', reason: 'Reverse USD supplier payment' },
+    actor,
+  )
+  check(
+    Number(
+      (await currency.overview(1, '2026-04-09')).banks.find((b: any) => b.id === usdBank)!
+        .base_balance,
+    ) === 16600000,
+    'Foreign payment reversal restores both cash currencies',
+  )
+  const usdBasePartial=await settlements.post(1,false,settlementSchema.parse({request_key:key(),invoice_id:usdPurchase.id,date:'2026-04-10',amount:30,bank_account_id:bank,cash_account_id:ids['1102'],exchange_rate:16000}),actor)
+  const partialDetail:any=await purchase.get(usdPurchase.id,1)
+  check(Number(partialDetail.outstanding_amount)===70 && partialDetail.status==='partially_paid','USD purchase partial payment from IDR bank preserves native outstanding')
+  const usdBaseFinal=await settlements.post(1,false,settlementSchema.parse({request_key:key(),invoice_id:usdPurchase.id,date:'2026-04-11',amount:70,bank_account_id:bank,cash_account_id:ids['1102'],exchange_rate:14000,processing_fee_amount:2,processing_fee_account_id:ids['6100']}),actor)
+  const finalDetail:any=await purchase.get(usdPurchase.id,1)
+  check(Number(finalDetail.outstanding_amount)===0 && finalDetail.status==='paid','USD purchase final IDR settlement closes native outstanding')
+  const [usdBasePayments]=await db.execute<any[]>('SELECT bank_currency,bank_amount,carrying_base_amount,fx_amount FROM supplier_payments WHERE id IN (?,?) ORDER BY id',[usdBasePartial.id,usdBaseFinal.id])
+  check(usdBasePayments[0].bank_currency==='IDR' && Number(usdBasePayments[0].bank_amount)===480000 && Number(usdBasePayments[0].carrying_base_amount)===450000 && Number(usdBasePayments[0].fx_amount)===30000,'USD partial payment posts 450000 AP, 480000 IDR bank, and 30000 FX loss')
+  check(Number(usdBasePayments[1].bank_amount)===1008000 && Number(usdBasePayments[1].carrying_base_amount)===1050000 && Number(usdBasePayments[1].fx_amount)===-70000,'USD final payment converts fee and posts 70000 FX gain without mixing bank currency')
+  const [usdPaymentBalances]=await db.execute<any[]>('SELECT j.id,SUM(l.debit-l.credit) difference FROM journals j JOIN journal_lines l ON l.journal_id=j.id WHERE j.id IN (?,?) GROUP BY j.id',[usdBasePartial.journalId,usdBaseFinal.journalId])
+  check(usdPaymentBalances.every(r=>Number(r.difference)===0),'Both IDR settlements of USD purchase generate balanced journals')
+  const listedUsdPayments=await settlements.list(1,false,{invoiceId:usdPurchase.id})
+  check(listedUsdPayments.some(p=>p.currency==='USD'&&p.bank_currency==='IDR'),'Payment history exposes invoice USD and bank IDR as separate currencies')
+  await settlements.reverse(1,false,usdBaseFinal.id,{request_key:key(),date:'2026-04-11',reason:'Verify IDR settlement reversal'},actor)
+  check(Number((await purchase.get(usdPurchase.id,1) as any).outstanding_amount)===70,'IDR settlement reversal restores USD payable outstanding')
+  await rejects(()=>settlements.post(1,false,settlementSchema.parse({request_key:key(),invoice_id:usdPurchase.id,date:'2026-04-12',amount:71,bank_account_id:bank,cash_account_id:ids['1102'],exchange_rate:16000}),actor),'USD overpayment is rejected atomically')
+  await rejects(()=>settlements.post(1,false,settlementSchema.parse({request_key:key(),invoice_id:usdPurchase.id,date:'2026-04-12',amount:70,bank_account_id:bank,cash_account_id:ids['1102']}),actor),'USD settlement without payment rate is rejected')
+  const usdStockItem=await insert("INSERT INTO items(company_id,sku,name,item_type,unit_id,inventory_account_id,purchase_account_id,cogs_account_id,sales_account_id) VALUES(1,'USD-STOCK','USD valuation item','inventory',?,?,?,?,?)",[unit,ids['1140'],ids['6100'],ids['5100'],ids['4100']])
+  const usdStockPurchase=await purchase.create(1,purchaseInvoiceSchema.parse({supplier_invoice_number:'USD-STOCK-PI',invoice_date:'2026-04-12',due_date:'2026-05-12',supplier_id:supplier,warehouse_id:warehouse,currency:'USD',exchange_rate:16000,lines:[{item_id:usdStockItem,quantity:10,unit_id:unit,unit_price:10}]}),actor)
+  await purchase.submit(usdStockPurchase.id,1,actor);await purchase.approve(usdStockPurchase.id,1,approver);await purchase.post(usdStockPurchase.id,1,actor)
+  const [usdStock]=await db.execute<any[]>('SELECT quantity,total_value FROM inventory_balances WHERE company_id=1 AND item_id=? AND warehouse_id=?',[usdStockItem,warehouse])
+  check(Number(usdStock[0].quantity)===10 && Number(usdStock[0].total_value)===1600000,'USD inventory purchase from a default-IDR supplier capitalizes base value correctly')
+  await rejects(()=>settlements.post(1,false,settlementSchema.parse({request_key:key(),date:'2026-04-13',allocations:[{invoice_id:usdPurchase.id,amount:70},{invoice_id:usdStockPurchase.id,amount:100}],bank_account_id:bank,cash_account_id:ids['1102'],exchange_rate:16500}),actor),'USD allocation across different suppliers is rejected')
+  const createUsdService=async(number:string,amount:number,rate:number,date:string)=>{
+    const invoice=await purchase.create(1,purchaseInvoiceSchema.parse({supplier_invoice_number:number,invoice_date:date,due_date:'2026-05-30',supplier_id:usdSupplier,currency:'USD',exchange_rate:rate,lines:[{item_id:shippingItem,quantity:1,unit_id:unit,unit_price:amount}]}),actor)
+    await purchase.submit(invoice.id,1,actor);await purchase.approve(invoice.id,1,approver);await purchase.post(invoice.id,1,actor);return invoice
+  }
+  const batchUsdInvoice=await createUsdService('USD-BATCH-PI',20,17000,'2026-04-12')
+  const multiUsdInput=settlementSchema.parse({request_key:key(),date:'2026-04-13',allocations:[{invoice_id:usdPurchase.id,amount:70},{invoice_id:batchUsdInvoice.id,amount:20}],bank_account_id:bank,cash_account_id:ids['1102'],exchange_rate:16500})
+  const multiUsd=await settlements.post(1,false,multiUsdInput,actor)
+  check((await settlements.post(1,false,multiUsdInput,actor)).id===multiUsd.id,'USD multi-invoice payment retry is idempotent')
+  const [multiUsdPayment]=await db.execute<any[]>('SELECT amount,bank_amount,carrying_base_amount,fx_amount FROM supplier_payments WHERE id=?',[multiUsd.id])
+  check(Number(multiUsdPayment[0].amount)===90 && Number(multiUsdPayment[0].bank_amount)===1485000 && Number(multiUsdPayment[0].carrying_base_amount)===1390000 && Number(multiUsdPayment[0].fx_amount)===95000,'Multiple USD invoices with different historical rates settle at their own carrying amounts')
+  check((await purchase.get(usdPurchase.id,1) as any).status==='paid' && (await purchase.get(batchUsdInvoice.id,1) as any).status==='paid','USD batch payment closes all selected invoices')
+  const roundingUsd=await createUsdService('USD-ROUNDING-PI',0.03,16000.5,'2026-04-14')
+  for(const date of ['2026-04-15','2026-04-16','2026-04-17'])await settlements.post(1,false,settlementSchema.parse({request_key:key(),invoice_id:roundingUsd.id,date,amount:0.01,bank_account_id:bank,cash_account_id:ids['1102'],exchange_rate:16000.5}),actor)
+  const [roundedAllocations]=await db.execute<any[]>('SELECT SUM(a.base_amount) total FROM supplier_payment_allocations a JOIN supplier_payments p ON p.id=a.supplier_payment_id WHERE a.purchase_invoice_id=? AND p.status=\'posted\'',[roundingUsd.id])
+  check(Number(roundedAllocations[0].total)===480.02 && Number((await purchase.get(roundingUsd.id,1) as any).outstanding_amount)===0,'Final USD partial payment absorbs rounding residue and exactly clears base AP')
+  const { AccountingScheduleService } = await import('../services/AccountingScheduleService'),
+    schedules = new AccountingScheduleService()
+  const { accountingScheduleSchema } = await import('../validators/accounting-schedule.validator')
+  const schedule = await schedules.create(
+    1,
+    accountingScheduleSchema.parse({
+      schedule_type: 'accrual',
+      name: 'Accrual verification',
+      start_date: '2026-05-31',
+      periods_count: 1,
+      total_estimated_amount: 1000,
+      pnl_account_id: ids['6100'],
+      balance_sheet_account_id: ids['2202'],
+      auto_reverse: false,
+      auto_submit: false,
+    }),
+    actor,
+  )
+  const scheduleDetail: any = (await schedules.overview(1)).find((s: any) => s.id === schedule.id),
+    entryId = Number(scheduleDetail.entries[0].id)
+  const generated = await schedules.generate(1, entryId, actor)
+  const { JournalService } = await import('../services/JournalService'),
+    journalService = new JournalService()
+  await journalService.submit(generated.journalId, 1, actor)
+  await journalService.approve(generated.journalId, 1, approver)
+  await journalService.post(generated.journalId, 1, actor)
+  await schedules.reconcile(1, entryId, { actual_amount: 1050, source_mode: 'observation' }, actor)
+  check(
+    !(await schedules.overview(1)).find((s: any) => s.id === schedule.id)!.entries[0]!
+      .actual_verified,
+    'Observed actual amounts do not claim journal verification',
+  )
+  const correction = { date: '2026-06-01', actual_amount: 1050, reference: 'ACTUAL-VERIFICATION' }
+  const draftCorrection = await schedules.adjustment(1, entryId, correction, actor)
+  check(
+    (await schedules.adjustment(1, entryId, correction, actor)).journalId ===
+      draftCorrection.journalId,
+    'Identical correction requests reuse the same draft',
+  )
+  await rejects(
+    () => schedules.adjustment(1, entryId, { ...correction, actual_amount: 1100 }, actor),
+    'A different actual correction cannot silently duplicate an existing draft',
+  )
+  const actualJournal = draftCorrection.journalId
+  await journalService.submit(actualJournal, 1, actor)
+  await journalService.approve(actualJournal, 1, approver)
+  await journalService.post(actualJournal, 1, actor)
+  const [actualLines] = await db.execute<any[]>(
+    'SELECT id FROM journal_lines WHERE journal_id=? AND account_id=?',
+    [actualJournal, ids['6100']],
+  )
+  await rejects(
+    () =>
+      schedules.reconcile(
+        1,
+        entryId,
+        {
+          actual_amount: 1100,
+          actual_line_id: actualLines[0].id,
+          source_mode: 'variance_adjustment',
+        },
+        actor,
+      ),
+    'Actual comparison rejects a correction journal with the wrong variance',
+  )
+  await schedules.reconcile(
+    1,
+    entryId,
+    { actual_amount: 1050, actual_line_id: actualLines[0].id, source_mode: 'variance_adjustment' },
+    actor,
+  )
+  check(
+    (await schedules.overview(1)).find((s: any) => s.id === schedule.id)!.entries[0]!
+      .actual_verified,
+    'Actual variance is verified against a posted expense line and its counterpart',
+  )
+  await posting.reverseManual({
+    companyId: 1,
+    journalId: actualJournal,
+    date: '2026-06-02',
+    reason: 'Reverse actual evidence',
+    context: actor,
+  })
+  check(
+    !(await schedules.overview(1)).find((s: any) => s.id === schedule.id)!.entries[0]!
+      .actual_verified,
+    'Reversed actual journals invalidate verification',
+  )
+  const reversing = await schedules.create(
+    1,
+    accountingScheduleSchema.parse({
+      schedule_type: 'accrual',
+      name: 'Reversing accrual',
+      start_date: '2026-07-31',
+      periods_count: 1,
+      total_estimated_amount: 1000,
+      pnl_account_id: ids['6100'],
+      balance_sheet_account_id: ids['2202'],
+      auto_reverse: true,
+      auto_submit: false,
+    }),
+    actor,
+  )
+  const reversingEntry: any = (await schedules.overview(1)).find((s: any) => s.id === reversing.id)!
+    .entries[0]
+  const reversingRecognition = await schedules.generate(1, reversingEntry.id, actor)
+  await journalService.submit(reversingRecognition.journalId, 1, actor)
+  await journalService.approve(reversingRecognition.journalId, 1, approver)
+  await journalService.post(reversingRecognition.journalId, 1, actor)
+  const actualFull = await post(
+    [
+      { accountId: ids['6100'], debit: '1050', credit: '0' },
+      { accountId: ids['2202'], debit: '0', credit: '1050' },
+    ],
+    '2026-08-01',
+  )
+  const [fullLines] = await db.query<any[]>(
+    'SELECT id FROM journal_lines WHERE journal_id=? AND account_id=?',
+    [actualFull, ids['6100']],
+  )
+  const actualFullInput = {
+    actual_amount: 1050,
+    actual_line_id: fullLines[0].id,
+    source_mode: 'expense_after_reversal' as const,
+  }
+  await rejects(
+    () => schedules.reconcile(1, reversingEntry.id, actualFullInput, actor),
+    'Full actual expense cannot verify while its estimate is still unreversed',
+  )
+  const reversingJournal = await schedules.reverse(1, reversingEntry.id, actor)
+  await journalService.submit(reversingJournal.journalId, 1, actor)
+  await journalService.approve(reversingJournal.journalId, 1, approver)
+  await journalService.post(reversingJournal.journalId, 1, actor)
+  await schedules.reconcile(1, reversingEntry.id, actualFullInput, actor)
+  check(
+    (await schedules.overview(1)).find((s: any) => s.id === reversing.id)!.entries[0]!
+      .actual_verified,
+    'Full actual expense verifies after the accrual reversal is posted',
+  )
+  await inventoryStress({item: stressItem, warehouse, supplier, customer, unit, inventoryAccount: ids['1140']!, actor, approver})
   const trial = await reports.trialBalance(1, { dateFrom: '2026-01-01', dateTo: '2026-12-31' })
   check(trial.balanced && Number(trial.difference) === 0, 'All resulting journals balance')
+  const { AccountingControlService } = await import('../services/AccountingControlService')
+  const controls = new AccountingControlService()
+  const initialControls = await controls.overview(1, '2026-12-31')
+  check(initialControls.checks.find(c=>c.code==='trial_balance')?.status==='passed', 'Control center verifies trial balance from posted data')
+  check(initialControls.checks.find(c=>c.code==='profit_link')?.status==='passed', 'Control center links fiscal profit to balance sheet earnings')
+  const [controlJournals] = await db.query<any[]>("SELECT id FROM journals WHERE company_id=1 AND status='posted' LIMIT 1")
+  const controlJournalId=controlJournals[0].id
+  await db.execute('UPDATE journals SET total_debit=total_debit+1 WHERE id=?',[controlJournalId])
+  const corruptControls=await controls.overview(1,'2026-12-31')
+  check(corruptControls.checks.find(c=>c.code==='journal_lines')?.status==='failed','Control center detects header totals inconsistent with journal lines')
+  await db.execute('UPDATE journals SET total_debit=total_debit-1 WHERE id=?',[controlJournalId])
+  const otherCompanyControls=await controls.overview(999999,'2026-12-31')
+  check(otherCompanyControls.reconciliations.length===0,'Control center does not expose another company balances')
   const [numbers] = await db.query<any[]>('SELECT journal_number FROM journals WHERE company_id=1')
   check(
     numbers.every((n) => /^JV-2026-\d{2}-\d{6}$/.test(n.journal_number)),
     'Journal numbers include year and month',
   )
   const { BackupService } = await import('../services/BackupService'),
+    { PrintTemplateService } = await import('../services/PrintTemplateService'),
     backupService = new BackupService()
+  const printTemplates=new PrintTemplateService()
+  const oldTemplate=await printTemplates.get(1,'sales_invoice')
+  await printTemplates.save(1,'sales_invoice',{...oldTemplate.template,headerTitle:'Invoice internal',marginTopMm:20,columnWidths:{name:40}},actor,{templateId:'internal',templateName:'Internal',setDefault:false,templateVersion:0})
+  check((await printTemplates.get(1,'sales_invoice')).templateId==='default','Saving an alternate print template preserves the existing print default')
+  const alternate=await printTemplates.get(1,'sales_invoice','internal')
+  check(alternate.template.marginTopMm===20 && Number((alternate.template.columnWidths as any).name)===40,'Named print template retains independent margins and column widths')
+  await printTemplates.save(1,'sales_invoice',alternate.template,actor,{templateId:'internal',templateName:'Internal',setDefault:true,templateVersion:1})
+  check((await printTemplates.get(1,'sales_invoice')).templateId==='internal','Print output resolves the selected default template')
+  await rejects(()=>printTemplates.save(1,'sales_invoice',alternate.template,actor,{templateId:'internal',templateName:'Stale',setDefault:true,templateVersion:1}),'Stale print template version cannot overwrite a concurrent edit')
+  await rejects(()=>printTemplates.get(999999,'sales_invoice','internal'),'Named print templates remain isolated by company')
+  const { verifyCoaGovernance } = await import('./coa-governance-verify')
+  await verifyCoaGovernance(actor.userId,approverId,ids['4100']!)
+  const { CurrencyService: CurrencyOptionsService } = await import('../services/CurrencyService')
+  const currencyOptionsService = new CurrencyOptionsService()
+  const currencyOptions = await currencyOptionsService.options(1)
+  check(currencyOptions.currencies.some(currency => currency.code === 'IDR') && currencyOptions.currencies.some(currency => currency.code === 'USD'),'Currency options include IDR bookkeeping currency alongside USD')
+  check((await currencyOptionsService.quote(1,'IDR','2026-10-04')).rate === '1','IDR bookkeeping exchange rate is always one')
+  await db.execute("UPDATE currencies SET is_active=FALSE WHERE code='IDR'")
+  check((await currencyOptionsService.options(1)).currencies.some(currency => currency.code === 'IDR'),'Bookkeeping currency stays available when its catalog record is inactive')
+  await db.execute("UPDATE currencies SET is_active=TRUE WHERE code='IDR'")
+  const departmentService = new (await import('../services/EntityService')).EntityService('departments')
+  const department = await departmentService.create(1,{code:'DEP-VERIFY',name:'Department verifier',is_active:true},actor)
+  const departmentId = Number(department.id)
+  await db.execute("INSERT INTO payroll_employees(company_id,employee_number,name,hire_date,ptkp_status,ter_category,basic_salary,fixed_allowance,created_by,is_active) VALUES(1,'DEP-EMP','Department employee','2027-01-01','TK/0','A',0,0,?,FALSE)",[actor.userId])
+  const [employeeRows] = await db.query<any[]>("SELECT * FROM payroll_employees WHERE company_id=1 AND employee_number='DEP-EMP'")
+  check(employeeRows.length > 0,'Department integration has an existing payroll employee')
+  const employee = employeeRows[0]
+  const payrollDepartmentService = new (await import('../services/PayrollService')).PayrollService()
+  await payrollDepartmentService.saveEmployee(1,employee.id,{...employee,is_active:Boolean(employee.is_active),department_id:departmentId},actor)
+  await departmentService.update(departmentId,1,{name:'Renamed verifier'},actor)
+  const [assigned] = await db.query<any[]>('SELECT department,department_id FROM payroll_employees WHERE id=?',[employee.id])
+  check(assigned[0].department==='Renamed verifier' && Number(assigned[0].department_id)===departmentId,'Department rename preserves employee relationship and updates display name')
+  check(await departmentService.remove(departmentId,1,actor)==='deactivated','Used departments are deactivated instead of physically deleted')
+  await rejects(()=>payrollDepartmentService.saveEmployee(1,null,{...employee,employee_number:'DEP-NEW',department_id:departmentId},actor),'Inactive departments cannot be assigned to new employees')
+  await rejects(()=>payrollDepartmentService.saveEmployee(1,employee.id,{...employee,department_id:999999999},actor),'Invalid department assignment is rejected')
+  await departmentService.update(departmentId,1,{is_active:false},actor)
+  await payrollDepartmentService.saveEmployee(1,employee.id,{...employee,is_active:false,department_id:departmentId},actor)
+  check((await departmentService.get(departmentId,1)).is_active===0,'Existing employees retain their inactive department')
+  await rejects(()=>departmentService.get(departmentId,999999),'Departments are isolated by company')
+  const { verifyUserAccess } = await import('./user-access-verify')
+  await verifyUserAccess(actor.userId)
+  await (await import('./platform-operations-verify')).verifyPlatformOperations(actor.userId)
+  const { verifyPayrollComponents } = await import('./payroll-components-verify')
+  await verifyPayrollComponents(actor.userId,approverId,ids)
+  const { verifyScale } = await import('./scale-verify')
+  await verifyScale(actor.userId,bank)
+  await (await import('./security-boundary-verify')).verifySecurityBoundary(actor.userId)
+  // Automation is retired; manual component lifecycle is verified above.
   const backup = await backupService.create(1, 'full', actor)
   const backupFile = await backupService.file(1, backup.id)
+  testBackupPath=backupFile.path
   const backupDocument = await Bun.file(backupFile.path).json()
   check(
     backupDocument.format === 'finora-portable-backup-v1' &&
       Object.keys(backupDocument.tables).length > 20,
     'Portable full backup includes schema and data without external database tools',
   )
+  const snapshotTotals=async()=>{
+    const [j]=await db.query<any[]>('SELECT COUNT(*) count FROM journals')
+    const [l]=await db.query<any[]>('SELECT SUM(debit) debit,SUM(credit) credit,COUNT(*) count FROM journal_lines')
+    const [stock]=await db.query<any[]>('SELECT SUM(quantity) quantity,SUM(total_value) value FROM inventory_balances')
+    return {journals:j[0],lines:l[0],stock:stock[0]}
+  }
+  const baseline=await snapshotTotals()
+  const {ReportingService:RestoreReportingService}=await import('../services/ReportingService')
+  const beforeReconciliation=await new RestoreReportingService().subledger(1,'2026-12-31')
+  const [binaryBefore]=await db.query<any[]>("SELECT id,SHA2(output,256) digest FROM report_exports WHERE output IS NOT NULL ORDER BY id")
+  const originalContent=await Bun.file(backupFile.path).text()
+  await Bun.write(backupFile.path,originalContent+'tampered')
+  await rejects(()=>backupService.restore(1,backup.id,'RESTORE '+backup.number,actor),'Restore rejects changed backup checksum before altering data')
+  await Bun.write(backupFile.path,originalContent)
+  await db.execute('UPDATE inventory_balances SET total_value=total_value+1 WHERE id=(SELECT id FROM (SELECT MIN(id) id FROM inventory_balances) t)')
+  await backupService.restore(1,backup.id,'RESTORE '+backup.number,actor)
+  assert.deepEqual(await snapshotTotals(),baseline)
+  assert.deepEqual(await new RestoreReportingService().subledger(1,'2026-12-31'),beforeReconciliation)
+  const [binaryAfter]=await db.query<any[]>("SELECT id,SHA2(output,256) digest FROM report_exports WHERE output IS NOT NULL ORDER BY id");assert.deepEqual(binaryAfter,binaryBefore)
+  const [liveSessions]=await db.query<any[]>('SELECT COUNT(*) n FROM auth_sessions WHERE revoked_at IS NULL')
+  check(Number(liveSessions[0].n)===0,'Restore revokes all previous sessions')
+  check(true,'Full restore reproduces journal counts, debit-credit totals and inventory balances in disposable schema')
   await unlink(backupFile.path)
+  testBackupPath=undefined
   console.log(`Completed ${checks} integration checks in isolated schema.`)
 } finally {
+  if(testBackupPath)await unlink(testBackupPath).catch(()=>undefined)
   await db.end()
   if (!/^finora_verify_\d+_\d+$/.test(schema) || schema === originalDatabase)
     throw new Error('Unsafe test schema cleanup')

@@ -5,6 +5,7 @@ import type { QueryExecutor } from '../types/database'
 import { ConflictError, NotFoundError } from '../utils/AppError'
 import { addDecimal, compareDecimal, subtractDecimal } from '../utils/decimal'
 import { AuditService } from './AuditService'
+import { requiredAccountMappingKeys } from './AccountMappingService'
 import type { PostingContext } from './PostingService'
 
 type PeriodRow = RowDataPacket & {
@@ -14,18 +15,20 @@ type PeriodRow = RowDataPacket & {
   month: number
   start_date: Date | string
   end_date: Date | string
-  status: 'open' | 'soft_closed' | 'closed'
+  status: 'open' | 'soft_closed' | 'closed' | 'locked'
 }
 
 type CloseCheck = {
   code:
     | 'ar_reconciled'
+    | 'account_mapping_complete'
     | 'ap_reconciled'
     | 'inventory_reconciled'
     | 'bank_reconciled'
     | 'depreciation_posted'
     | 'recurring_journals_reviewed'
     | 'trial_balance_balanced'
+    | 'financial_statements_consistent'
   status: 'passed' | 'failed'
   isBlocking: boolean
   subledger?: string
@@ -57,6 +60,7 @@ export class PeriodClosingService {
       `SELECT p.*,
          r.id latest_run_id,r.run_number,r.requested_status,r.status run_status,
          r.validated_at,r.completed_at,r.notes run_notes,
+         rr.id pending_reopen_request_id,rr.requested_by reopen_requested_by,rr.reason reopen_reason,
          COALESCE((SELECT COUNT(*) FROM period_close_checks c
            WHERE c.period_close_run_id=r.id AND c.is_blocking=TRUE AND c.status='failed'),0)
            blocking_failures
@@ -65,6 +69,7 @@ export class PeriodClosingService {
          SELECT x.id FROM period_close_runs x
          WHERE x.accounting_period_id=p.id ORDER BY x.run_number DESC LIMIT 1
        )
+       LEFT JOIN period_reopen_requests rr ON rr.id=(SELECT pr.id FROM period_reopen_requests pr WHERE pr.accounting_period_id=p.id AND pr.status='pending' ORDER BY pr.id DESC LIMIT 1)
        WHERE ${conditions.join(' AND ')}
        ORDER BY p.start_date DESC`,
       values,
@@ -93,18 +98,18 @@ export class PeriodClosingService {
 
   async validate(
     companyId: number,
-    input: { period_id: number; requested_status: 'soft_closed' | 'closed'; notes?: string | null },
+    input: { period_id: number; requested_status: 'soft_closed' | 'closed' | 'locked'; notes?: string | null },
     context: PostingContext,
   ) {
     const period = await this.period(companyId, input.period_id)
-    if (period.status === 'closed') throw new ConflictError('Periode sudah ditutup permanen')
-    if (input.requested_status === 'soft_closed' && period.status !== 'open')
-      throw new ConflictError('Tutup sementara hanya dapat dilakukan dari periode terbuka')
+    const expected = input.requested_status === 'soft_closed' ? 'open' : input.requested_status === 'closed' ? 'soft_closed' : 'closed'
+    if (period.status !== expected)
+      throw new ConflictError(`Status ${input.requested_status} hanya dapat diproses setelah tahap ${expected}`)
 
     const checks = await this.evaluate(companyId, period)
     return transaction(async (connection) => {
       const locked = await this.period(companyId, input.period_id, connection, true)
-      if (locked.status === 'closed') throw new ConflictError('Periode sudah ditutup permanen')
+      if (locked.status !== expected) throw new ConflictError('Status periode telah berubah. Muat ulang data')
       const [sequence] = await connection.execute<RowDataPacket[]>(
         'SELECT COALESCE(MAX(run_number),0)+1 next_number FROM period_close_runs WHERE accounting_period_id=?',
         [period.id],
@@ -195,9 +200,15 @@ export class PeriodClosingService {
              soft_closed_by=?,close_notes=? WHERE id=? AND company_id=?`,
           [context.userId, run.notes ?? null, run.accounting_period_id, companyId],
         )
-      else
+      else if (run.requested_status === 'closed')
         await connection.execute(
           `UPDATE accounting_periods SET status='closed',closed_at=NOW(),closed_by=?,
+             close_notes=? WHERE id=? AND company_id=?`,
+          [context.userId, run.notes ?? null, run.accounting_period_id, companyId],
+        )
+      else
+        await connection.execute(
+          `UPDATE accounting_periods SET status='locked',locked_at=NOW(),locked_by=?,
              close_notes=? WHERE id=? AND company_id=?`,
           [context.userId, run.notes ?? null, run.accounting_period_id, companyId],
         )
@@ -222,14 +233,51 @@ export class PeriodClosingService {
     })
   }
 
-  async reopen(companyId: number, periodId: number, reason: string, context: PostingContext) {
+  async requestReopen(companyId: number, periodId: number, reason: string, context: PostingContext) {
     return transaction(async (connection) => {
       const period = await this.period(companyId, periodId, connection, true)
       if (period.status === 'open') throw new ConflictError('Periode sudah terbuka')
+      const [pending] = await connection.execute<RowDataPacket[]>(
+        "SELECT id FROM period_reopen_requests WHERE company_id=? AND accounting_period_id=? AND status='pending' FOR UPDATE",
+        [companyId, periodId],
+      )
+      if (pending[0]) throw new ConflictError('Permintaan pembukaan kembali masih menunggu persetujuan')
+      const target = period.status === 'locked' ? 'closed' : period.status === 'closed' ? 'soft_closed' : 'open'
+      const [created] = await connection.execute<ResultSetHeader>(
+        `INSERT INTO period_reopen_requests(company_id,accounting_period_id,previous_status,target_status,reason,requested_by)
+         VALUES(?,?,?,?,?,?)`,
+        [companyId, periodId, period.status, target, reason, context.userId],
+      )
+      await this.audit.log(connection, {
+        companyId, userId: context.userId, module: 'period-closing', action: 'request_reopen',
+        recordType: 'period_reopen_request', recordId: created.insertId,
+        newValue: { periodId, previousStatus: period.status, targetStatus: target, reason },
+        requestId: context.requestId, ip: context.ip,
+      })
+      return { id: created.insertId, periodId, status: 'pending' as const, targetStatus: target }
+    })
+  }
+
+  async decideReopen(companyId: number, requestId: number, decision: 'approved' | 'rejected', notes: string, context: PostingContext) {
+    return transaction(async (connection) => {
+      const [rows] = await connection.execute<RowDataPacket[]>(
+        `SELECT r.*,p.start_date,p.end_date,p.status period_status FROM period_reopen_requests r
+         INNER JOIN accounting_periods p ON p.id=r.accounting_period_id AND p.company_id=r.company_id
+         WHERE r.id=? AND r.company_id=? FOR UPDATE`,
+        [requestId, companyId],
+      )
+      const request = rows[0]
+      if (!request) throw new NotFoundError('Permintaan pembukaan kembali tidak ditemukan')
+      if (request.status !== 'pending') throw new ConflictError('Permintaan ini sudah diputuskan')
+      if (Number(request.requested_by) === context.userId)
+        throw new ConflictError('Pemohon tidak boleh menyetujui permintaannya sendiri')
+      if (decision === 'approved') {
+        if (request.period_status !== request.previous_status)
+          throw new ConflictError('Status periode telah berubah sejak permintaan dibuat')
       const [later] = await connection.execute<RowDataPacket[]>(
         `SELECT id,year,month,status FROM accounting_periods
          WHERE company_id=? AND start_date>? AND status<>'open' ORDER BY start_date LIMIT 1`,
-        [companyId, period.end_date],
+        [companyId, request.end_date],
       )
       if (later[0])
         throw new ConflictError(
@@ -238,31 +286,37 @@ export class PeriodClosingService {
       const [yearEnd] = await connection.execute<RowDataPacket[]>(
         `SELECT id FROM year_end_closings
          WHERE company_id=? AND status='posted' AND closing_date BETWEEN ? AND ? LIMIT 1`,
-        [companyId, period.start_date, period.end_date],
+        [companyId, request.start_date, request.end_date],
       )
       if (yearEnd[0])
         throw new ConflictError(
           'Balikkan penutupan tahun terlebih dahulu sebelum membuka periode ini',
         )
+        await connection.execute(
+          `UPDATE accounting_periods SET status=?,
+             locked_at=IF(?='locked',NULL,locked_at),locked_by=IF(?='locked',NULL,locked_by),
+             closed_at=IF(?='closed',NULL,closed_at),closed_by=IF(?='closed',NULL,closed_by),
+             soft_closed_at=IF(?='soft_closed',NULL,soft_closed_at),soft_closed_by=IF(?='soft_closed',NULL,soft_closed_by),
+             reopened_at=NOW(),reopened_by=?,close_notes=? WHERE id=? AND company_id=?`,
+          [request.target_status, request.previous_status, request.previous_status, request.previous_status, request.previous_status, request.previous_status, request.previous_status, context.userId, notes, request.accounting_period_id, companyId],
+        )
+      }
       await connection.execute(
-        `UPDATE accounting_periods SET status='open',closed_at=NULL,closed_by=NULL,
-           soft_closed_at=NULL,soft_closed_by=NULL,reopened_at=NOW(),reopened_by=?,close_notes=?
-         WHERE id=? AND company_id=?`,
-        [context.userId, reason, periodId, companyId],
+        'UPDATE period_reopen_requests SET status=?,decided_by=?,decided_at=NOW(),decision_notes=? WHERE id=?',
+        [decision, context.userId, notes, requestId],
       )
       await this.audit.log(connection, {
         companyId,
         userId: context.userId,
         module: 'period-closing',
-        action: 'reopen',
-        recordType: 'accounting_period',
-        recordId: periodId,
-        oldValue: { status: period.status },
-        newValue: { status: 'open', reason },
+        action: decision === 'approved' ? 'approve_reopen' : 'reject_reopen',
+        recordType: 'period_reopen_request', recordId: requestId,
+        oldValue: { status: request.previous_status },
+        newValue: { decision, targetStatus: request.target_status, notes },
         requestId: context.requestId,
         ip: context.ip,
       })
-      return { id: periodId, status: 'open' as const }
+      return { id: requestId, status: decision, periodId: Number(request.accounting_period_id), targetStatus: request.target_status }
     })
   }
 
@@ -335,7 +389,22 @@ export class PeriodClosingService {
     const unpostedTotal = Number(unposted[0]?.total ?? 0)
     const trialPassed = compareDecimal(trialDifference, '0') === 0 && unpostedTotal === 0
 
+    const [mappingRows] = await db.execute<RowDataPacket[]>(
+      `SELECT COUNT(DISTINCT m.mapping_key) configured FROM account_mappings m
+       INNER JOIN accounts a ON a.id=m.account_id AND a.company_id=m.company_id
+       WHERE m.company_id=? AND m.mapping_key IN (${requiredAccountMappingKeys.map(() => '?').join(',')})
+         AND a.is_active=TRUE AND a.is_posting=TRUE AND a.deleted_at IS NULL`,
+      [companyId, ...requiredAccountMappingKeys],
+    )
+    const requiredMappings = requiredAccountMappingKeys.length
+    const configuredMappings = Number(mappingRows[0]?.configured ?? 0)
+
     return [
+      {
+        code: 'account_mapping_complete', status: configuredMappings === requiredMappings ? 'passed' : 'failed', isBlocking: true,
+        details: configuredMappings === requiredMappings ? 'Seluruh pemetaan akun jurnal otomatis sudah lengkap.' : `${requiredMappings - configuredMappings} pemetaan akun jurnal otomatis belum lengkap.`,
+        evidence: { configuredMappings, requiredMappings },
+      },
       reconcileCheck('ar', 'ar_reconciled', 'Piutang'),
       reconcileCheck('ap', 'ap_reconciled', 'Utang'),
       reconcileCheck('inventory', 'inventory_reconciled', 'Persediaan'),
@@ -371,6 +440,12 @@ export class PeriodClosingService {
           ? 'Neraca saldo seimbang dan tidak ada jurnal periode yang belum selesai.'
           : `Selisih neraca saldo ${trialDifference}; jurnal belum selesai ${unpostedTotal}.`,
         evidence: { debit, credit, unpostedJournals: unpostedTotal },
+      },
+      {
+        code: 'financial_statements_consistent', status: trialPassed ? 'passed' : 'failed', isBlocking: true,
+        generalLedger: debit, subledger: credit, difference: trialDifference,
+        details: trialPassed ? 'Trial Balance, Neraca, dan Laba Rugi bersumber dari jurnal posted yang konsisten.' : 'Laporan keuangan belum konsisten karena jurnal belum seimbang atau belum selesai.',
+        evidence: { source: 'posted-journals', debit, credit },
       },
     ]
   }

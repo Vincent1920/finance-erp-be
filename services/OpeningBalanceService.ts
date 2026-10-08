@@ -1,7 +1,9 @@
 import type { ResultSetHeader, RowDataPacket } from 'mysql2/promise'
 
 import type { QueryExecutor } from '../types/database'
-import { ConflictError, ValidationError } from '../utils/AppError'
+import { db, transaction } from '../config/database'
+import { ConflictError, NotFoundError, ValidationError } from '../utils/AppError'
+import { JournalService } from './JournalService'
 import {
   addDecimal,
   compareDecimal,
@@ -216,6 +218,104 @@ export class OpeningBalanceService {
     private readonly audit = new AuditService(),
   ) {}
 
+  async list(companyId: number) {
+    const [rows] = await db.execute<RowDataPacket[]>(
+      `SELECT b.*,j.journal_number,j.status AS journal_status,
+       (SELECT COUNT(*) FROM opening_balance_lines l WHERE l.opening_balance_batch_id=b.id) line_count
+       FROM opening_balance_batches b LEFT JOIN journals j ON j.id=b.journal_id
+       WHERE b.company_id=? ORDER BY b.as_of_date DESC,b.id DESC LIMIT 500`,
+      [companyId],
+    )
+    return rows
+  }
+
+  async detail(companyId: number, id: number): Promise<RowDataPacket & { lines: RowDataPacket[] }> {
+    const [batches] = await db.execute<RowDataPacket[]>(
+      'SELECT * FROM opening_balance_batches WHERE id=? AND company_id=?',
+      [id, companyId],
+    )
+    if (!batches[0]) throw new NotFoundError('Batch saldo awal tidak ditemukan')
+    const [lines] = await db.execute<RowDataPacket[]>(
+      `SELECT l.*,a.code account_code,a.name account_name FROM opening_balance_lines l
+       LEFT JOIN accounts a ON a.id=l.account_id WHERE l.opening_balance_batch_id=? ORDER BY l.line_number`,
+      [id],
+    )
+    return { ...batches[0], lines } as RowDataPacket & { lines: RowDataPacket[] }
+  }
+
+  async prepareJournal(companyId: number, id: number, context: OpeningBalanceContext) {
+    return transaction(async (connection) => {
+      const [batches] = await connection.execute<RowDataPacket[]>(
+        'SELECT * FROM opening_balance_batches WHERE id=? AND company_id=? FOR UPDATE',
+        [id, companyId],
+      )
+      const batch = batches[0]
+      if (!batch) throw new NotFoundError('Batch saldo awal tidak ditemukan')
+      if (batch.journal_id) return { id: Number(batch.journal_id) }
+      if (!['draft', 'validated'].includes(batch.status))
+        throw new ConflictError('Status batch tidak dapat diproses')
+      const [lines] = await connection.execute<RowDataPacket[]>(
+        'SELECT * FROM opening_balance_lines WHERE opening_balance_batch_id=? ORDER BY line_number FOR UPDATE',
+        [id],
+      )
+      if (lines.some((l) => l.line_type !== 'general_ledger'))
+        throw new ValidationError(
+          'Posting ini khusus saldo awal buku besar. Rincian piutang, utang, dan stok harus direkonsiliasi melalui subledger terlebih dahulu.',
+        )
+      if (
+        lines.some(
+          (l) => l.currency !== 'IDR' || compareDecimal(String(l.exchange_rate), '1', 8) !== 0,
+        )
+      )
+        throw new ValidationError(
+          'Saldo awal buku besar harus dalam rupiah dengan kurs 1. Konversikan nilai sebelum impor.',
+        )
+      const journal = await new JournalService().createInTransaction(
+        connection,
+        companyId,
+        {
+          journal_date: dateOnly(
+            batch.as_of_date instanceof Date
+              ? batch.as_of_date.toISOString().slice(0, 10)
+              : String(batch.as_of_date).slice(0, 10),
+            'Tanggal saldo awal',
+          ),
+          reference: String(batch.batch_number),
+          description: `Saldo awal ${batch.batch_number}`,
+          currency: 'IDR',
+          exchange_rate: '1',
+          lines: lines.map((l) => ({
+            accountId: Number(l.account_id),
+            debit: String(l.debit),
+            credit: String(l.credit),
+            description: String(l.notes ?? 'Saldo awal'),
+          })),
+        },
+        context,
+      )
+      await connection.execute(
+        "UPDATE journals SET source_type='opening_balance',source_id=? WHERE id=? AND company_id=?",
+        [id, journal.id, companyId],
+      )
+      await connection.execute(
+        "UPDATE opening_balance_batches SET journal_id=?,status='validated',validated_by=?,validated_at=NOW(),version=version+1 WHERE id=? AND company_id=?",
+        [journal.id, context.userId, id, companyId],
+      )
+      await this.audit.log(connection, {
+        companyId,
+        userId: context.userId,
+        module: 'opening-balances',
+        action: 'prepare_journal',
+        recordType: 'opening_balance_batch',
+        recordId: id,
+        newValue: { journalId: journal.id },
+        requestId: context.requestId,
+        ip: context.ip,
+      })
+      return journal
+    })
+  }
+
   /**
    * Persists a balanced general-ledger opening batch using the caller's transaction.
    * This method intentionally does not create or post a journal.
@@ -246,8 +346,12 @@ export class OpeningBalanceService {
       documentDate: optionalDate(line.documentDate, `Tanggal dokumen baris ${index + 1}`),
       dueDate: optionalDate(line.dueDate, `Jatuh tempo baris ${index + 1}`),
       lineType: line.lineType ?? 'general_ledger',
-      customerId: line.customerId ? positiveId(line.customerId, `Pelanggan baris ${index + 1}`) : null,
-      supplierId: line.supplierId ? positiveId(line.supplierId, `Pemasok baris ${index + 1}`) : null,
+      customerId: line.customerId
+        ? positiveId(line.customerId, `Pelanggan baris ${index + 1}`)
+        : null,
+      supplierId: line.supplierId
+        ? positiveId(line.supplierId, `Pemasok baris ${index + 1}`)
+        : null,
       notes: limitedText(line.notes, `Catatan baris ${index + 1}`, 500),
     }))
 

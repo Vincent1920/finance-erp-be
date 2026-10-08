@@ -90,8 +90,8 @@ export class CustomerPaymentRepository {
       `INSERT INTO customer_payments (
          company_id, payment_number, payment_date, customer_id, bank_account_id,
          cash_account_id, payment_method, reference, amount, base_amount,
-         unallocated_amount, currency, exchange_rate, notes, created_by, status
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')`,
+         bank_amount, base_bank_amount, unallocated_amount, currency, exchange_rate, notes, created_by, status
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')`,
       [
         data.companyId,
         data.number,
@@ -101,6 +101,8 @@ export class CustomerPaymentRepository {
         data.cashAccountId,
         data.paymentMethod,
         data.reference ?? null,
+        data.amount,
+        data.baseAmount,
         data.amount,
         data.baseAmount,
         data.unallocatedAmount,

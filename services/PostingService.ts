@@ -1,4 +1,9 @@
+import type { RowDataPacket } from 'mysql2/promise'
+import { validateFxPolicy } from './AccountingPolicyService'
+import { AccountMappingService } from './AccountMappingService'
+import { assertManualAccounts } from './CoaControlService'
 import type { QueryExecutor } from '../types/database'
+import { prepareDirectPosting } from './WorkflowPolicyService'
 
 import { transaction } from '../config/database'
 import { JOURNAL_STATUS } from '../constants/accounting'
@@ -26,6 +31,10 @@ export interface JournalLineInput {
   projectId?: number | null
   debit: DecimalInput
   credit: DecimalInput
+  currencyDebit?: DecimalInput
+  currencyCredit?: DecimalInput
+  currencyCode?: string | null
+  exchangeRate?: DecimalInput
 }
 
 export interface PostingContext {
@@ -100,7 +109,21 @@ export class PostingService {
 
   async validateLines(connection: QueryExecutor, companyId: number, lines: JournalLineInput[]) {
     const totals = assertBalanced(lines)
+    const [foreignBanks] = await connection.execute<import('mysql2/promise').RowDataPacket[]>(
+      `SELECT b.gl_account_id,b.currency FROM bank_accounts b JOIN companies c ON c.id=b.company_id WHERE b.company_id=? AND b.deleted_at IS NULL AND b.currency<>c.base_currency`,
+      [companyId],
+    )
     for (const line of lines) {
+      const foreignBank = foreignBanks.find((bank) => Number(bank.gl_account_id) === line.accountId)
+      if (
+        foreignBank &&
+        (line.currencyCode !== foreignBank.currency ||
+          line.currencyDebit === undefined ||
+          line.currencyCredit === undefined)
+      )
+        throw new ValidationError(
+          'Rekening valas wajib memiliki rincian nominal valuta asal. Gunakan transfer atau pelunasan valas dari modul sumber.',
+        )
       await this.validation.ensureActiveReference(connection, {
         table: 'accounts',
         id: line.accountId,
@@ -137,13 +160,16 @@ export class PostingService {
       projectId: line.projectId,
       debit: normalizeDecimal(line.debit),
       credit: normalizeDecimal(line.credit),
-      currencyDebit: normalizeDecimal(line.debit),
-      currencyCredit: normalizeDecimal(line.credit),
-      exchangeRate: normalizedRate,
+      currencyDebit: normalizeDecimal(line.currencyDebit ?? line.debit),
+      currencyCredit: normalizeDecimal(line.currencyCredit ?? line.credit),
+      currencyCode: line.currencyCode ?? null,
+      exchangeRate: normalizeDecimal(line.exchangeRate ?? normalizedRate, 8),
     }))
   }
 
   async createPostedJournal(connection: QueryExecutor, input: SourceJournalInput) {
+    const needed = input.sourceType === 'sales_invoice' ? ['AR_CONTROL','REVENUE','INVENTORY','COGS'] : input.sourceType === 'purchase_invoice' ? ['AP_CONTROL','INVENTORY','PURCHASE_EXPENSE'] : []
+    await new AccountMappingService().ensureReadyFor(connection,input.companyId,needed as import('./AccountMappingService').AccountMappingKey[])
     if (['year_end_closing', 'year_end_retained_earnings'].includes(input.sourceType))
       await this.validation.ensureClosedPeriod(connection, input.companyId, input.date)
     else await this.validation.ensureOpenPeriod(connection, input.companyId, input.date)
@@ -155,6 +181,9 @@ export class PostingService {
     )
     if (existing) throw new ConflictError('Transaksi sudah pernah diposting')
 
+    const [policyCompany]=await connection.execute<RowDataPacket[]>('SELECT base_currency FROM companies WHERE id=?',[input.companyId])
+    const journalCurrency=input.currency ?? String(policyCompany[0]!.base_currency)
+    await validateFxPolicy(connection,input.companyId,journalCurrency,input.date,String(input.exchangeRate ?? '1'))
     const totals = await this.validateLines(connection, input.companyId, input.lines)
     const number = await this.sequences.next(connection, input.companyId, 'journal', input.date)
     const journalId = await this.journals.create(connection, {
@@ -163,7 +192,7 @@ export class PostingService {
       date: input.date,
       reference: input.reference,
       description: input.description,
-      currency: input.currency ?? 'IDR',
+      currency: journalCurrency,
       exchangeRate: normalizeDecimal(input.exchangeRate ?? '1', 8),
       sourceType: input.sourceType,
       sourceId: input.sourceId,
@@ -200,13 +229,15 @@ export class PostingService {
       if (journal.status === JOURNAL_STATUS.POSTED || journal.status === JOURNAL_STATUS.REVERSED) {
         throw new ConflictError('Jurnal sudah pernah diposting')
       }
-      if (journal.status !== JOURNAL_STATUS.APPROVED) {
+      if (journal.status !== JOURNAL_STATUS.APPROVED && !(await prepareDirectPosting(connection,companyId,'journals',id,String(journal.status),context.userId))) {
         throw new ConflictError('Hanya jurnal yang sudah disetujui dapat diposting')
       }
 
       const date = this.dateOnly(journal.journal_date)
       await this.validation.ensureOpenPeriod(connection, companyId, date)
+      await validateFxPolicy(connection,companyId,String(journal.currency),date,String(journal.exchange_rate))
       const lines = await this.journals.lines(connection, id)
+      if (!journal.source_type) await assertManualAccounts(connection, companyId, lines.map(line => Number(line.account_id)))
       await this.validateLines(
         connection,
         companyId,
@@ -223,6 +254,12 @@ export class PostingService {
         posted_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
       })
       await this.audit.log(connection, this.auditInput(companyId, context, 'post', id))
+      if (journal.source_type === 'opening_balance') {
+        await connection.execute(
+          "UPDATE opening_balance_batches SET status='posted',posted_by=?,posted_at=NOW(),version=version+1 WHERE company_id=? AND journal_id=?",
+          [context.userId, companyId, id],
+        )
+      }
       return { id, status: JOURNAL_STATUS.POSTED }
     })
   }
@@ -237,6 +274,12 @@ export class PostingService {
       throw new ConflictError('Hanya jurnal posted yang dapat direversal')
     }
 
+    const [payrollLinks] = await connection.query<RowDataPacket[]>(
+      `SELECT r.id FROM payroll_entry_components c JOIN payroll_entries e ON e.id=c.entry_id JOIN payroll_runs r ON r.id=e.run_id WHERE c.source_journal_id=? AND r.company_id=? AND r.status IN ('approved','posted','paid','locked') LIMIT 1`,
+      [original.id,input.companyId],
+    )
+    if (payrollLinks.length) throw new ConflictError('Jurnal sumber sudah dipakai payroll yang disetujui. Selesaikan koreksi payroll sebelum pembalikan sumber.')
+
     if ((input.sourceType ?? '').startsWith('year_end_'))
       await this.validation.ensureClosedPeriod(connection, input.companyId, input.date)
     else await this.validation.ensureOpenPeriod(connection, input.companyId, input.date)
@@ -248,6 +291,10 @@ export class PostingService {
       projectId: line.project_id ? Number(line.project_id) : null,
       debit: line.credit,
       credit: line.debit,
+      currencyDebit: line.currency_credit,
+      currencyCredit: line.currency_debit,
+      currencyCode: line.currency_code,
+      exchangeRate: line.exchange_rate,
     }))
     const totals = await this.validateLines(connection, input.companyId, reversalLines)
     const number = await this.sequences.next(connection, input.companyId, 'journal', input.date)
@@ -278,6 +325,12 @@ export class PostingService {
       reversed_at: timestamp,
       reversal_journal_id: reversalId,
     })
+    if (original.source_type === 'opening_balance') {
+      await connection.execute(
+        "UPDATE opening_balance_batches SET status='reversed',reversal_journal_id=?,reversed_by=?,reversed_at=NOW(),version=version+1 WHERE company_id=? AND journal_id=?",
+        [reversalId, input.context.userId, input.companyId, original.id],
+      )
+    }
     await this.audit.log(connection, {
       ...this.auditInput(input.companyId, input.context, 'reverse', original.id),
       newValue: { status: 'reversed', reversalJournalId: reversalId, reason: input.reason },
@@ -286,7 +339,17 @@ export class PostingService {
   }
 
   async reverseManual(input: ReverseJournalInput) {
-    return transaction((connection) => this.reversePostedJournal(connection, input))
+    return transaction(async (connection) => {
+      const [rows] = await connection.execute<import('mysql2/promise').RowDataPacket[]>(
+        'SELECT source_type FROM journals WHERE id=? AND company_id=? FOR UPDATE',
+        [input.journalId, input.companyId],
+      )
+      if (['currency_transfer', 'currency_revaluation'].includes(rows[0]?.source_type))
+        throw new ConflictError(
+          'Balikkan transaksi melalui menu Mata Uang & Transfer agar saldo rekening ikut diperbarui',
+        )
+      return this.reversePostedJournal(connection, input)
+    })
   }
 
   private dateOnly(value: Date | string) {

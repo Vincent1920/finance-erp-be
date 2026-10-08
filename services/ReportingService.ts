@@ -11,6 +11,7 @@ import {
   sumScaled,
   toScaledInteger,
 } from '../utils/decimal'
+import { ReconciliationWorkspaceService } from './ReconciliationWorkspaceService'
 
 type ReportRow = Record<string, unknown>
 
@@ -60,7 +61,10 @@ const earningsFromMovements = (rows: ReportRow[]) => {
 }
 
 export class ReportingService {
-  constructor(private repository = new ReportRepository()) {}
+  constructor(
+    private repository = new ReportRepository(),
+    private reconciliation = new ReconciliationWorkspaceService(),
+  ) {}
 
   generalLedger(companyId: number, filters: LedgerFilters) {
     return this.repository.generalLedger(companyId, filters)
@@ -102,7 +106,7 @@ export class ReportingService {
   }
 
   async profitLoss(companyId: number, range: DateRange) {
-    const rows = (await this.repository.accountMovements(companyId, range)) as ReportRow[]
+    const rows = (await this.repository.accountMovements(companyId, range, true)) as ReportRow[]
     const accountRows = rows.map((row) => {
       const accountType = String(row.account_type)
       const amount = ['revenue', 'other_income'].includes(accountType)
@@ -272,11 +276,21 @@ export class ReportingService {
   }
 
   async subledger(companyId: number, asOfDate: string) {
-    const rows = (await this.repository.subledgerReconciliation(companyId, asOfDate)) as ReportRow[]
+    const [groups, cases] = await Promise.all([
+      Promise.all([
+      this.repository.subledgerReconciliation(companyId, asOfDate),
+      this.repository.fixedAssetReconciliation(companyId, asOfDate),
+      this.repository.payrollReconciliation(companyId, asOfDate),
+      ]),
+      this.reconciliation.cases(companyId, asOfDate),
+    ])
+    const caseMap = new Map(cases.map((row) => [`${row.reconciliation_type}:${row.account_id}`, row]))
+    const rows = groups.flat() as ReportRow[]
     return rows.map((row) => {
       const subledger = money(row.subledger)
       const generalLedger = money(row.general_ledger)
       const difference = subtractDecimal(subledger, generalLedger)
+      const workflow = caseMap.get(`${row.reconciliation_type}:${row.account_id}`)
       return {
         type: String(row.reconciliation_type),
         accountId: Number(row.account_id),
@@ -286,6 +300,12 @@ export class ReportingService {
         generalLedger,
         difference,
         balanced: compareDecimal(difference, '0') === 0,
+        caseId: workflow ? Number(workflow.id) : null,
+        workflowStatus: workflow ? String(workflow.status) : compareDecimal(difference, '0') === 0 ? 'matched' : 'open',
+        assignedTo: workflow?.assigned_to ? Number(workflow.assigned_to) : null,
+        assignedToName: workflow?.assigned_to_name ? String(workflow.assigned_to_name) : null,
+        dueDate: workflow?.due_date ? String(workflow.due_date) : null,
+        resolutionNote: workflow?.resolution_note ? String(workflow.resolution_note) : null,
       }
     })
   }

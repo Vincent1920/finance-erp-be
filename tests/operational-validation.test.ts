@@ -2,9 +2,17 @@ import { describe, expect, test } from 'bun:test'
 import { customerSchema, supplierSchema } from '../validators/entity.validator'
 import { quantitySchema, nonnegativeQuantitySchema } from '../validators/common.validator'
 import { depreciationTarget } from '../services/FixedAssetService'
-import { printTemplateSchema, purchaseReturnSchema } from '../validators/operations.validator'
+import {
+  bankMatchBatchSchema,
+  printTemplateSchema,
+  purchaseReturnSchema,
+} from '../validators/operations.validator'
 import { companyProfileSchema } from '../validators/system.validator'
-import { payrollEntryUpdateSchema, payrollPolicySchema } from '../validators/payroll.validator'
+import {
+  payrollEmployeeStatusSchema,
+  payrollEntryUpdateSchema,
+  payrollPolicySchema,
+} from '../validators/payroll.validator'
 import { calculateBpjs } from '../services/PayrollService'
 import {
   periodCloseValidationSchema,
@@ -18,8 +26,99 @@ import {
   recurringActiveSchema,
   recurringJournalSchema,
 } from '../validators/recurring-journal.validator'
+import {
+  reconciliationCaseSchema,
+  reconciliationDetailQuerySchema,
+} from '../validators/report.validator'
+import { settingCapability } from '../services/SettingCapabilityService'
 
 describe('Operational input safeguards', () => {
+  test('settings distinguish enforced, reference, and planned behavior', () => {
+    expect(settingCapability('sales.block_over_credit_limit')).toMatchObject({
+      capability: 'enforced',
+      editable: true,
+    })
+    expect(settingCapability('default_bank_account_id')).toMatchObject({
+      capability: 'reference',
+      editable: true,
+    })
+    expect(settingCapability('inventory.cost_method')).toMatchObject({
+      capability: 'enforced',
+      editable: true,
+    })
+    expect(settingCapability('inventory.reorder_notifications')).toMatchObject({
+      capability: 'planned',
+      editable: false,
+    })
+  })
+  test('reconciliation workflow requires evidence when a difference is closed', () => {
+    const base = {
+      as_of_date: '2026-09-30',
+      reconciliation_type: 'ar',
+      account_id: 1,
+      general_ledger: 100,
+      subledger: 90,
+      difference: -10,
+    }
+    expect(
+      reconciliationCaseSchema.safeParse({ ...base, status: 'in_review', assigned_to: 2 }).success,
+    ).toBeTrue()
+    expect(reconciliationCaseSchema.safeParse({ ...base, status: 'resolved' }).success).toBeFalse()
+    expect(
+      reconciliationCaseSchema.safeParse({
+        ...base,
+        status: 'resolved',
+        note: 'Jurnal koreksi JV-2026-09-000001 sudah diposting.',
+      }).success,
+    ).toBeTrue()
+    expect(
+      reconciliationCaseSchema.safeParse({
+        ...base,
+        status: 'accepted_variance',
+        note: 'Selisih pembulatan tidak material.',
+      }).success,
+    ).toBeTrue()
+    expect(
+      reconciliationDetailQuerySchema.safeParse({ ...base, reconciliation_type: 'unsupported' })
+        .success,
+    ).toBeFalse()
+  })
+  test('bank reconciliation accepts partial many-to-many allocations', () => {
+    const request_key = crypto.randomUUID()
+    expect(
+      bankMatchBatchSchema.safeParse({
+        request_key,
+        allocations: [
+          { statement_line_id: 1, journal_line_id: 10, matched_amount: 75000 },
+          { statement_line_id: 1, journal_line_id: 11, matched_amount: 25000 },
+          { statement_line_id: 2, journal_line_id: 11, matched_amount: 50000 },
+        ],
+      }).success,
+    ).toBeTrue()
+    expect(
+      bankMatchBatchSchema.safeParse({
+        request_key,
+        allocations: [{ statement_line_id: 1, journal_line_id: 10, matched_amount: 0 }],
+      }).success,
+    ).toBeFalse()
+  })
+  test('employee deactivation requires an effective date and auditable reason', () => {
+    expect(
+      payrollEmployeeStatusSchema.safeParse({ is_active: false, reason: 'Kontrak selesai' })
+        .success,
+    ).toBeFalse()
+    expect(
+      payrollEmployeeStatusSchema.safeParse({
+        is_active: false,
+        effective_date: '2026-10-02',
+        reason: 'Kontrak selesai',
+      }).success,
+    ).toBeTrue()
+    expect(
+      payrollEmployeeStatusSchema.safeParse({ is_active: true, reason: 'Dipekerjakan kembali' })
+        .success,
+    ).toBeTrue()
+  })
   for (const [name, schema] of [
     ['customer', customerSchema],
     ['supplier', supplierSchema],

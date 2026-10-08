@@ -1,4 +1,5 @@
 import type { Context } from 'hono'
+import { ForbiddenError } from '../utils/AppError'
 import { SystemUserService } from '../services/SystemUserService'
 import { created, ok, paginated } from '../utils/response'
 import { systemActor } from '../utils/request-context'
@@ -24,16 +25,13 @@ export class SystemUserController {
   create = async (c: Context) =>
     created(c, await this.service.create(systemActor(c), createUserSchema.parse(await c.req.json())))
 
-  update = async (c: Context) =>
-    ok(
-      c,
-      await this.service.update(
-        systemActor(c),
-        Number(c.req.param('id')),
-        updateUserSchema.parse(await c.req.json()),
-      ),
-      'Pengguna berhasil diperbarui',
-    )
+  update = async (c: Context) => {
+    const input = updateUserSchema.parse(await c.req.json())
+    const user = c.get('user')
+    if (input.password && !user.roles.includes('super-admin') && !user.permissions.includes('users.reset_password'))
+      throw new ForbiddenError('Anda tidak mempunyai hak akses untuk mengganti password pengguna')
+    return ok(c, await this.service.update(systemActor(c), Number(c.req.param('id')), input), 'Pengguna berhasil diperbarui')
+  }
 
   status = async (c: Context) => {
     const { status } = userStatusSchema.parse(await c.req.json())

@@ -1,0 +1,6 @@
+import {createHmac,timingSafeEqual} from 'node:crypto'
+const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+export function base32(data:Buffer){let bits=0,value=0,result='';for(const byte of data){value=(value<<8)|byte;bits+=8;while(bits>=5){result+=alphabet[(value>>>(bits-5))&31];bits-=5}}if(bits)result+=alphabet[(value<<(5-bits))&31];return result}
+export function decode32(secret:string){let bits=0,value=0;const bytes:number[]=[];for(const c of secret){const n=alphabet.indexOf(c);if(n<0)throw new Error('Invalid MFA secret');value=(value<<5)|n;bits+=5;if(bits>=8){bytes.push((value>>>(bits-8))&255);bits-=8}}return Buffer.from(bytes)}
+export function totp(secret:string,counter:number,digits=6){const data=Buffer.alloc(8);data.writeBigUInt64BE(BigInt(counter));const digest=createHmac('sha1',decode32(secret)).update(data).digest(),offset=digest[19]!&15;return String((digest.readUInt32BE(offset)&0x7fffffff)%10**digits).padStart(digits,'0')}
+export function verifyTotp(secret:string,code:string,last=-1,now=Date.now()){if(!/^\d{6}$/.test(code))return null;const current=Math.floor(now/30000);for(const n of [current,current-1,current+1])if(n>last&&timingSafeEqual(Buffer.from(totp(secret,n)),Buffer.from(code)))return n;return null}

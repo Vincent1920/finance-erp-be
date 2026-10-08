@@ -19,11 +19,13 @@
     "db:test:demo:negative": "bun database/demo-negative.ts",
     "db:reset": "bun database/reset.ts",
     "test": "bun test",
+    "test:foundation": "bun database/foundation-verify.ts",
     "format": "prettier --write \"**/*.{ts,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,json,md}\"",
     "db:verify:operations": "bun database/operational-verify.ts"
   },
   "dependencies": {
+    "@types/pdfkit": "^0.17.6",
     "bcryptjs": "^3.0.2",
     "csv-parse": "^7.0.2",
     "csv-stringify": "^6.8.3",
@@ -33,6 +35,7 @@
     "hono-rate-limiter": "^0.4.2",
     "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.14.3",
+    "pdfkit": "^0.20.2",
     "zod": "^4.1.5"
   },
   "devDependencies": {

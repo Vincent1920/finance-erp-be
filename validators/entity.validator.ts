@@ -62,7 +62,6 @@ export const accountSchema = z.object({
   ]),
   normal_balance: z.enum(['debit', 'credit']),
   parent_id: nullableId,
-  level: z.coerce.number().int().min(0).max(10).default(0),
   is_header: z.boolean().default(false),
   is_posting: z.boolean().default(true),
   is_active: active,
@@ -72,6 +71,7 @@ export const accountSchema = z.object({
     .nullable()
     .optional(),
   report_group: z.string().trim().max(100).nullable().optional(),
+  presentation_order:z.coerce.number().int().min(0).max(9999999).nullable().optional(),
 })
 
 export const itemSchema = z.object({
@@ -166,7 +166,10 @@ export const bankAccountSchema = z.object({
   is_active: active,
 })
 
+export const departmentSchema = costCenterSchema.extend({name:name.max(100)})
+
 export const entitySchemas = {
+  departments: departmentSchema,
   accounting_periods: accountingPeriodSchema,
   accounts: accountSchema,
   customers: customerSchema,

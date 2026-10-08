@@ -16,6 +16,9 @@ route.get('/receivable-aging', canView, controller.receivableAging)
 route.get('/payable-aging', canView, controller.payableAging)
 route.get('/inventory', canView, controller.inventory)
 route.get('/subledger-reconciliation', canView, controller.subledger)
+route.get('/controls', canView, controller.controls)
+route.get('/subledger-reconciliation/detail', canView, controller.reconciliationDetail)
+route.put('/subledger-reconciliation/case', requirePermission('reports.reconcile'), controller.reconciliationCase)
 route.get('/budget-vs-actual', canView, controller.budgetVsActual)
 
 export default route

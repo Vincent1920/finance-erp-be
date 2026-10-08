@@ -6,6 +6,7 @@ import {
   createErrorReport,
   createImportTemplate,
   parseImportFile,
+  parseMappedBankFile,
 } from '../services/import/TabularFileService'
 import { importRowsQuerySchema } from '../validators/import.validator'
 import type { QueryExecutor } from '../types/database'
@@ -96,6 +97,58 @@ describe('data import parser and templates', () => {
     expect(result.parsed.rows).toHaveLength(1)
     expect(result.parsed.rows[0]?.rowNumber).toBe(2)
     expect(result.parsed.rows[0]?.data.customer_name).toBe('PT Contoh, Tbk')
+  })
+
+  test('normalizes Indonesian dates in the standard bank template', async () => {
+    const template = await createImportTemplate('bank_statement', 'csv')
+    const parsed = await parseImportFile(file('template.csv', template.content), 'bank_statement')
+    const original = String(parsed.parsed.rows[0]!.data.transaction_date)
+    const local = original.split('-').reverse().join('/')
+    const changed = Buffer.from(template.content.toString().replace(original, local))
+    const result = await parseImportFile(file('excel.csv', changed), 'bank_statement')
+    expect(result.parsed.rows[0]!.data.transaction_date).toBe(original)
+  })
+
+  test('preserves ISO dates with an Indonesian bank mapping', async () => {
+    const result = await parseMappedBankFile(file('bank.csv', Buffer.from('Tanggal,Uraian,Saldo\n2026-10-03,Setoran,100\n')), {
+      delimiter: ',', date_format: 'DD/MM/YYYY', decimal_separator: 'dot', header_row: 1,
+      column_mapping: { transaction_date: 'Tanggal', description: 'Uraian', balance: 'Saldo' },
+    }, 'BANK-BCA')
+    expect(result.parsed.rows[0]!.data.transaction_date).toBe('2026-10-03')
+  })
+
+  test('maps a saved bank CSV profile into the standard statement columns', async () => {
+    const content = Buffer.from(
+      'Tanggal;Uraian;Nominal;Saldo\n03/10/2026;Setoran pelanggan;1.250,50;10.250,50\n04/10/2026;Biaya admin;-25,00;10.225,50\n',
+      'utf8',
+    )
+    const result = await parseMappedBankFile(
+      file('mutasi-bca.csv', content, 'text/csv'),
+      {
+        delimiter: ';',
+        date_format: 'DD/MM/YYYY',
+        decimal_separator: 'comma',
+        header_row: 1,
+        column_mapping: {
+          transaction_date: 'Tanggal',
+          description: 'Uraian',
+          reference: '',
+          debit: '',
+          credit: '',
+          amount: 'Nominal',
+          balance: 'Saldo',
+        },
+      },
+      'BANK-BCA',
+    )
+    expect(result.parsed.rows[0]?.data).toMatchObject({
+      bank_account_code: 'BANK-BCA',
+      transaction_date: '2026-10-03',
+      debit: 1250.5,
+      credit: 0,
+      balance: 10250.5,
+    })
+    expect(result.parsed.rows[1]?.data).toMatchObject({ debit: 0, credit: 25 })
   })
 
   test('rejects missing required columns and unexpected columns', async () => {

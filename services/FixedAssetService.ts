@@ -1,3 +1,4 @@
+import { accountingPolicy } from './AccountingPolicyService'
 import type { RowDataPacket, ResultSetHeader } from 'mysql2/promise'
 import { db } from '../config/database'
 import { BusinessValidationService } from './BusinessValidationService'
@@ -13,7 +14,12 @@ import {
 } from '../utils/decimal'
 import { ConflictError, NotFoundError, ValidationError } from '../utils/AppError'
 import type { AssetInput, ReversalInput } from '../validators/operations.validator'
-export function depreciationTarget(cost: string, salvage: string, life: number, months: number) {
+export function depreciationTarget(cost: string, salvage: string, life: number, months: number, method = 'straight_line') {
+  if(method==='declining_balance'){
+    const total=toScaledInteger(cost)-toScaledInteger(salvage); let remaining=total; const n=Math.max(0,Math.min(life,months));
+    for(let i=0;i<n;i++){ const straight=(remaining+BigInt(Math.floor((life-i)/2)))/BigInt(life-i); const declining=((remaining+toScaledInteger(salvage))*2n+BigInt(Math.floor(life/2)))/BigInt(life); remaining-=declining>straight?(declining>remaining?remaining:declining):straight; }
+    return fromScaledInteger(total-remaining)
+  }
   const depreciable = toScaledInteger(cost) - toScaledInteger(salvage)
   const elapsed = BigInt(Math.max(0, Math.min(life, months)))
   return fromScaledInteger((depreciable * elapsed + BigInt(Math.floor(life / 2))) / BigInt(life))
@@ -21,6 +27,19 @@ export function depreciationTarget(cost: string, salvage: string, life: number, 
 const dateOnly = (v: unknown) =>
   v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10)
 export class FixedAssetService {
+  async history(companyId: number, assetId: number) {
+    const [assets] = await db.execute<RowDataPacket[]>('SELECT id FROM fixed_assets WHERE id=? AND company_id=? AND deleted_at IS NULL', [assetId, companyId])
+    if (!assets.length) throw new NotFoundError('Aset tidak ditemukan')
+    const [rows] = await db.execute<RowDataPacket[]>(
+      `SELECT d.*,j.journal_number,j.status journal_status,r.journal_number reversal_journal_number,r.journal_date reversal_date
+       FROM asset_depreciations d
+       LEFT JOIN journals j ON j.id=d.journal_id AND j.company_id=d.company_id
+       LEFT JOIN journals r ON r.id=d.reversal_journal_id AND r.company_id=d.company_id
+       WHERE d.company_id=? AND d.fixed_asset_id=? ORDER BY d.depreciation_date DESC,d.id DESC`,
+      [companyId, assetId],
+    )
+    return rows
+  }
   async list(companyId: number, asOf: string) {
     const [rows] = await db.execute<RowDataPacket[]>(
       `SELECT a.*,COALESCE((SELECT SUM(d.depreciation_amount) FROM asset_depreciations d WHERE d.fixed_asset_id=a.id AND d.company_id=a.company_id AND d.status='posted' AND d.depreciation_date<=?),0) posted_depreciation,
@@ -43,14 +62,14 @@ export class FixedAssetService {
           String(a.purchase_cost),
           String(a.salvage_value),
           Number(a.useful_life_months),
-          months,
+          months, String(a.depreciation_method ?? 'straight_line'),
         ),
-        monthly = depreciationTarget(
+        monthly = subtractDecimal(depreciationTarget(
           String(a.purchase_cost),
           String(a.salvage_value),
           Number(a.useful_life_months),
-          1,
-        ),
+          Number(a.posted_depreciation_count)+1, String(a.depreciation_method ?? 'straight_line'),
+        ),String(a.posted_depreciation)),
         nextIndex = Number(a.posted_depreciation_count) + 1,
         nextDate = new Date(Date.UTC(
           Number(service.slice(0, 4)),
@@ -74,6 +93,10 @@ export class FixedAssetService {
       'asset-acquisition',
       input,
       async (connection) => {
+        const policy=await accountingPolicy(connection,companyId)
+        const life=input.life_months ?? Number(policy['accounting.default_asset_life_months']??48)
+        const method=policy['accounting.default_depreciation_method']||'straight_line'
+        if(compareDecimal(input.cost,policy['accounting.asset_capitalization_threshold']||'0')<0)throw new ValidationError('Nilai di bawah batas kapitalisasi; catat sebagai beban pembelian, bukan aset tetap')
         const validation = new BusinessValidationService()
         if (
           new Set([input.asset_account_id, input.accumulated_account_id, input.expense_account_id])
@@ -99,7 +122,7 @@ export class FixedAssetService {
             companyId,
             categoryCode,
             'Kelompok aset ' + input.asset_account_id,
-            input.life_months,
+            life,
             input.asset_account_id,
             input.accumulated_account_id,
             input.expense_account_id,
@@ -120,7 +143,7 @@ export class FixedAssetService {
             input.in_service_date,
             input.cost,
             input.salvage_value,
-            input.life_months,
+            life,
             input.asset_account_id,
             input.accumulated_account_id,
             input.expense_account_id,
@@ -131,6 +154,7 @@ export class FixedAssetService {
             context.userId,
           ],
         )
+        await connection.execute('UPDATE fixed_assets SET depreciation_method=? WHERE id=? AND company_id=?',[method,result.insertId,companyId])
         let journalId: number | null = null
         if (!input.already_recorded) {
           if (
@@ -160,7 +184,7 @@ export class FixedAssetService {
           recordType: 'fixed_asset',
           recordId: result.insertId,
           recordNumber: input.code,
-          newValue: { ...input, journalId },
+          newValue: { ...input, life_months: life, depreciation_method: method, capitalization_threshold: policy['accounting.asset_capitalization_threshold']||'0', journalId },
         })
         return { id: result.insertId, journalId }
       },
@@ -215,7 +239,7 @@ export class FixedAssetService {
             String(asset.purchase_cost),
             String(asset.salvage_value),
             Number(asset.useful_life_months),
-            months,
+            months, String(asset.depreciation_method ?? 'straight_line'),
           ),
           amount = subtractDecimal(target, String(prior[0]!.total))
         if (compareDecimal(amount, '0') <= 0)

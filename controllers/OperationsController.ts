@@ -19,7 +19,10 @@ import {
   bankingQuerySchema,
   statementSchema,
   bankMatchSchema,
+  bankMatchBatchSchema,
   bankUnmatchSchema,
+  bankMatchingRuleSchema,
+  bankImportMappingSchema,
 } from '../validators/operations.validator'
 import { printTemplateSchema } from '../validators/operations.validator'
 import { assetSchema, depreciationSchema } from '../validators/operations.validator'
@@ -40,6 +43,8 @@ import {
   taxReconciliationQuerySchema,
   taxReportImportSchema,
   taxResolutionSchema,
+  taxPaymentSchema,
+  taxAmendmentSchema,
 } from '../validators/tax-reconciliation.validator'
 export const operationContext = (c: Context) => ({
   userId: c.get('user').id,
@@ -47,37 +52,94 @@ export const operationContext = (c: Context) => ({
   ip: requestIp(c),
 })
 export class OperationsController {
+  assetHistory = async (c: Context) => ok(c, await new FixedAssetService().history(c.get('user').companyId, positiveIdSchema.parse(c.req.param('id'))))
+  taxPayment = async (c: Context) =>
+    ok(
+      c,
+      await new TaxReconciliationService().payment(
+        c.get('user').companyId,
+        taxPaymentSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
+  taxAmendment = async (c: Context) => {
+    const input = taxAmendmentSchema.parse(await c.req.json())
+    return ok(
+      c,
+      await new TaxReconciliationService().amend(
+        c.get('user').companyId,
+        input.period,
+        input.reason,
+        operationContext(c),
+      ),
+    )
+  }
+  taxVersion = async (c: Context) =>
+    ok(
+      c,
+      await new TaxReconciliationService().version(
+        c.get('user').companyId,
+        positiveIdSchema.parse(c.req.param('id')),
+      ),
+    )
   taxReconciliation = async (c: Context) => {
     const query = taxReconciliationQuerySchema.parse(c.req.query())
-    return ok(c, await new TaxReconciliationService().overview(
-      c.get('user').companyId, query.period, query.scope,
-    ))
+    return ok(
+      c,
+      await new TaxReconciliationService().overview(
+        c.get('user').companyId,
+        query.period,
+        query.scope,
+      ),
+    )
   }
-  taxReportImport = async (c: Context) => ok(c, await new TaxReconciliationService().importReport(
-    c.get('user').companyId,
-    taxReportImportSchema.parse(await c.req.json()),
-    operationContext(c),
-  ))
-  taxInternalImport = async (c: Context) => ok(c, await new TaxReconciliationService().importInternal(
-    c.get('user').companyId,
-    taxReportImportSchema.parse(await c.req.json()),
-    operationContext(c),
-  ))
-  taxDocumentLink = async (c: Context) => ok(c, await new TaxReconciliationService().linkDocument(
-    c.get('user').companyId,
-    taxDocumentLinkSchema.parse(await c.req.json()),
-    operationContext(c),
-  ))
-  taxResolution = async (c: Context) => ok(c, await new TaxReconciliationService().resolve(
-    c.get('user').companyId,
-    taxResolutionSchema.parse(await c.req.json()),
-    operationContext(c),
-  ))
+  taxReportImport = async (c: Context) =>
+    ok(
+      c,
+      await new TaxReconciliationService().importReport(
+        c.get('user').companyId,
+        taxReportImportSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
+  taxInternalImport = async (c: Context) =>
+    ok(
+      c,
+      await new TaxReconciliationService().importInternal(
+        c.get('user').companyId,
+        taxReportImportSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
+  taxDocumentLink = async (c: Context) =>
+    ok(
+      c,
+      await new TaxReconciliationService().linkDocument(
+        c.get('user').companyId,
+        taxDocumentLinkSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
+  taxResolution = async (c: Context) =>
+    ok(
+      c,
+      await new TaxReconciliationService().resolve(
+        c.get('user').companyId,
+        taxResolutionSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
   taxPeriodStatus = async (c: Context) => {
     const input = taxPeriodStatusSchema.parse(await c.req.json())
-    return ok(c, await new TaxReconciliationService().setStatus(
-      c.get('user').companyId, input.period, input.status, operationContext(c),
-    ))
+    return ok(
+      c,
+      await new TaxReconciliationService().setStatus(
+        c.get('user').companyId,
+        input.period,
+        input.status,
+        operationContext(c),
+      ),
+    )
   }
   budgets = async (c: Context) => ok(c, await new BudgetService().list(c.get('user').companyId))
   budgetCreate = async (c: Context) =>
@@ -141,6 +203,16 @@ export class OperationsController {
         operationContext(c),
       ),
     )
+  bankMatchBatch = async (c: Context) =>
+    ok(
+      c,
+      await new BankingService().matchBatch(
+        c.get('user').companyId,
+        bankMatchBatchSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+      'Alokasi rekonsiliasi bank berhasil disimpan',
+    )
   bankUnmatch = async (c: Context) =>
     ok(
       c,
@@ -150,18 +222,78 @@ export class OperationsController {
         operationContext(c),
       ),
     )
-  bankSuggestions = async (c: Context) => ok(c, await new BankingService().suggestions(
-    c.get('user').companyId,
-    bankingQuerySchema.parse(c.req.query()),
-  ))
+  bankSuggestions = async (c: Context) =>
+    ok(
+      c,
+      await new BankingService().suggestions(
+        c.get('user').companyId,
+        bankingQuerySchema.parse(c.req.query()),
+      ),
+    )
+  bankMatchingRules = async (c: Context) =>
+    ok(c, await new BankingService().matchingRules(c.get('user').companyId))
+  bankMatchingRuleSave = async (c: Context) =>
+    ok(
+      c,
+      await new BankingService().saveMatchingRule(
+        c.get('user').companyId,
+        bankMatchingRuleSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+      'Aturan pencocokan bank berhasil disimpan',
+    )
+  bankMatchingRuleDelete = async (c: Context) =>
+    ok(
+      c,
+      await new BankingService().deleteMatchingRule(
+        c.get('user').companyId,
+        positiveIdSchema.parse(c.req.param('id')),
+      ),
+      'Aturan pencocokan bank berhasil dihapus',
+    )
+  bankImportMappings = async (c: Context) =>
+    ok(c, await new BankingService().importMappings(c.get('user').companyId))
+  bankImportMappingSave = async (c: Context) =>
+    ok(
+      c,
+      await new BankingService().saveImportMapping(
+        c.get('user').companyId,
+        bankImportMappingSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+      'Pemetaan kolom impor bank berhasil disimpan',
+    )
+  bankImportMappingDelete = async (c: Context) =>
+    ok(
+      c,
+      await new BankingService().deleteImportMapping(
+        c.get('user').companyId,
+        positiveIdSchema.parse(c.req.param('id')),
+      ),
+      'Pemetaan kolom impor bank berhasil dihapus',
+    )
   printTemplate = async (c: Context) =>
-    ok(c, await new PrintTemplateService().get(c.get('user').companyId, c.req.query('document_type') ?? 'sales_invoice'))
+    ok(
+      c,
+      await new PrintTemplateService().get(
+        c.get('user').companyId,
+        c.req.query('document_type') ?? 'sales_invoice',
+        c.req.query('template_id'),
+      ),
+    )
   printTemplateSave = async (c: Context) => {
     const parsed = printTemplateSchema.parse(await c.req.json())
-    const { documentType, ...template } = parsed
-    return ok(c, await new PrintTemplateService().save(
-      c.get('user').companyId, documentType, template, operationContext(c),
-    ))
+    const { documentType, templateId,templateName,setDefault,templateVersion,...template } = parsed
+    return ok(
+      c,
+      await new PrintTemplateService().save(
+        c.get('user').companyId,
+        documentType,
+        template,
+        operationContext(c),
+        {templateId,templateName,setDefault,templateVersion},
+      ),
+    )
   }
   assets = async (c: Context) =>
     ok(
@@ -189,18 +321,26 @@ export class OperationsController {
         operationContext(c),
       ),
     )
-  depreciationReverse = async (c: Context) => ok(c, await new FixedAssetService().reverseDepreciation(
-    c.get('user').companyId,
-    positiveIdSchema.parse(c.req.param('id')),
-    reversalOperationSchema.parse(await c.req.json()),
-    operationContext(c),
-  ))
-  assetReverse = async (c: Context) => ok(c, await new FixedAssetService().reverseAsset(
-    c.get('user').companyId,
-    positiveIdSchema.parse(c.req.param('id')),
-    reversalOperationSchema.parse(await c.req.json()),
-    operationContext(c),
-  ))
+  depreciationReverse = async (c: Context) =>
+    ok(
+      c,
+      await new FixedAssetService().reverseDepreciation(
+        c.get('user').companyId,
+        positiveIdSchema.parse(c.req.param('id')),
+        reversalOperationSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
+  assetReverse = async (c: Context) =>
+    ok(
+      c,
+      await new FixedAssetService().reverseAsset(
+        c.get('user').companyId,
+        positiveIdSchema.parse(c.req.param('id')),
+        reversalOperationSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
   purchaseReturns = async (c: Context) =>
     ok(c, await new PurchaseReturnService().list(c.get('user').companyId))
   purchaseReturn = async (c: Context) =>
@@ -213,12 +353,15 @@ export class OperationsController {
       ),
     )
   purchaseReturnReverse = async (c: Context) =>
-    ok(c, await new PurchaseReturnService().reverse(
-      c.get('user').companyId,
-      positiveIdSchema.parse(c.req.param('id')),
-      reversalOperationSchema.parse(await c.req.json()),
-      operationContext(c),
-    ))
+    ok(
+      c,
+      await new PurchaseReturnService().reverse(
+        c.get('user').companyId,
+        positiveIdSchema.parse(c.req.param('id')),
+        reversalOperationSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
   stockList = (transfer: boolean) => async (c: Context) =>
     ok(c, await new StockOperationService().list(c.get('user').companyId, transfer))
   stockPost = (transfer: boolean) => async (c: Context) =>
@@ -232,23 +375,34 @@ export class OperationsController {
       ),
     )
   stockReverse = (transfer: boolean) => async (c: Context) =>
-    ok(c, await new StockOperationService().reverse(
-      c.get('user').companyId,
-      transfer,
-      positiveIdSchema.parse(c.req.param('id')),
-      reversalOperationSchema.parse(await c.req.json()),
-      operationContext(c),
-    ))
-  itemUnits = async (c: Context) => ok(c, await new StockOperationService().itemUnits(
-    c.get('user').companyId,
-    positiveIdSchema.parse(c.req.param('itemId')),
-  ))
-  itemUnitsSave = async (c: Context) => ok(c, await new StockOperationService().saveItemUnits(
-    c.get('user').companyId,
-    positiveIdSchema.parse(c.req.param('itemId')),
-    itemUnitsSchema.parse(await c.req.json()),
-    operationContext(c),
-  ))
+    ok(
+      c,
+      await new StockOperationService().reverse(
+        c.get('user').companyId,
+        transfer,
+        positiveIdSchema.parse(c.req.param('id')),
+        reversalOperationSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
+  itemUnits = async (c: Context) =>
+    ok(
+      c,
+      await new StockOperationService().itemUnits(
+        c.get('user').companyId,
+        positiveIdSchema.parse(c.req.param('itemId')),
+      ),
+    )
+  itemUnitsSave = async (c: Context) =>
+    ok(
+      c,
+      await new StockOperationService().saveItemUnits(
+        c.get('user').companyId,
+        positiveIdSchema.parse(c.req.param('itemId')),
+        itemUnitsSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
   settlements = (sales: boolean) => async (c: Context) =>
     ok(
       c,
@@ -284,70 +438,122 @@ export class OperationsController {
       ),
     )
   settlementReverse = (sales: boolean) => async (c: Context) =>
-    ok(c, await new SettlementService().reverse(
-      c.get('user').companyId,
-      sales,
-      positiveIdSchema.parse(c.req.param('id')),
-      reversalOperationSchema.parse(await c.req.json()),
-      operationContext(c),
-    ))
+    ok(
+      c,
+      await new SettlementService().reverse(
+        c.get('user').companyId,
+        sales,
+        positiveIdSchema.parse(c.req.param('id')),
+        reversalOperationSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
   settlementDelete = (sales: boolean) => async (c: Context) =>
-    ok(c, await new SettlementService().remove(
-      c.get('user').companyId,
-      sales,
-      positiveIdSchema.parse(c.req.param('id')),
-      operationContext(c),
-    ))
+    ok(
+      c,
+      await new SettlementService().remove(
+        c.get('user').companyId,
+        sales,
+        positiveIdSchema.parse(c.req.param('id')),
+        operationContext(c),
+      ),
+    )
   credits = (sales: boolean) => async (c: Context) =>
-    ok(c, await new CreditService().list(
-      c.get('user').companyId,
-      sales,
-      c.req.query('party_id') ? positiveIdSchema.parse(c.req.query('party_id')) : undefined,
-    ))
+    ok(
+      c,
+      await new CreditService().list(
+        c.get('user').companyId,
+        sales,
+        c.req.query('party_id') ? positiveIdSchema.parse(c.req.query('party_id')) : undefined,
+      ),
+    )
   creditApply = (sales: boolean) => async (c: Context) =>
-    ok(c, await new CreditService().apply(
-      c.get('user').companyId,
-      sales,
-      creditActionSchema.parse(await c.req.json()),
-      operationContext(c),
-    ))
+    ok(
+      c,
+      await new CreditService().apply(
+        c.get('user').companyId,
+        sales,
+        creditActionSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
   creditRefund = (sales: boolean) => async (c: Context) =>
-    ok(c, await new CreditService().refund(
-      c.get('user').companyId,
-      sales,
-      creditActionSchema.parse(await c.req.json()),
-      operationContext(c),
-    ))
+    ok(
+      c,
+      await new CreditService().refund(
+        c.get('user').companyId,
+        sales,
+        creditActionSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
   creditReverse = async (c: Context) =>
-    ok(c, await new CreditService().reverse(
+    ok(
+      c,
+      await new CreditService().reverse(
+        c.get('user').companyId,
+        positiveIdSchema.parse(c.req.param('id')),
+        reversalOperationSchema.parse(await c.req.json()),
+        operationContext(c),
+      ),
+    )
+  savedViews = async (c: Context) =>
+    ok(
+      c,
+      await new SavedViewService().list(
+        c.get('user').companyId,
+        c.get('user').id,
+        c.req.query('screen_key') ?? '',
+      ),
+    )
+  savedViewSave = async (c: Context) =>
+    ok(
+      c,
+      await new SavedViewService().save(
+        c.get('user').companyId,
+        c.get('user').id,
+        savedViewSchema.parse(await c.req.json()),
+      ),
+    )
+  savedViewDelete = async (c: Context) =>
+    ok(
+      c,
+      await new SavedViewService().remove(
+        c.get('user').companyId,
+        c.get('user').id,
+        positiveIdSchema.parse(c.req.param('id')),
+      ),
+    )
+  backups = async (c: Context) => ok(c, await new BackupService().list(c.get('user').companyId))
+  backupCreate = async (c: Context) =>
+    ok(
+      c,
+      await new BackupService().create(
+        c.get('user').companyId,
+        backupSchema.parse(await c.req.json()).type,
+        operationContext(c),
+      ),
+    )
+  backupDownload = async (c: Context) => {
+    const result = await new BackupService().file(
       c.get('user').companyId,
       positiveIdSchema.parse(c.req.param('id')),
-      reversalOperationSchema.parse(await c.req.json()),
-      operationContext(c),
-    ))
-  savedViews = async (c: Context) => ok(c, await new SavedViewService().list(
-    c.get('user').companyId,
-    c.get('user').id,
-    c.req.query('screen_key') ?? '',
-  ))
-  savedViewSave = async (c: Context) => ok(c, await new SavedViewService().save(
-    c.get('user').companyId,
-    c.get('user').id,
-    savedViewSchema.parse(await c.req.json()),
-  ))
-  savedViewDelete = async (c: Context) => ok(c, await new SavedViewService().remove(
-    c.get('user').companyId,
-    c.get('user').id,
-    positiveIdSchema.parse(c.req.param('id')),
-  ))
-  backups = async (c: Context) => ok(c, await new BackupService().list(c.get('user').companyId))
-  backupCreate = async (c: Context) => ok(c, await new BackupService().create(c.get('user').companyId, backupSchema.parse(await c.req.json()).type, operationContext(c)))
-  backupDownload = async (c: Context) => {
-    const result = await new BackupService().file(c.get('user').companyId, positiveIdSchema.parse(c.req.param('id')))
-    return c.body(await Bun.file(result.path).arrayBuffer(), 200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="${result.backup.file_name}"` })
+    )
+    return c.body(await Bun.file(result.path).arrayBuffer(), 200, {
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename="${result.backup.file_name}"`,
+    })
   }
   backupRestore = async (c: Context) => {
     const input = restoreSchema.parse(await c.req.json())
-    return ok(c, await new BackupService().restore(c.get('user').companyId, input.backup_id, input.confirmation, operationContext(c)))
+    return ok(
+      c,
+      await new BackupService().restore(
+        c.get('user').companyId,
+        input.backup_id,
+        input.confirmation,
+        operationContext(c),
+      ),
+    )
   }
 }

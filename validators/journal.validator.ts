@@ -37,6 +37,11 @@ export const journalSchema = z.object({
   lines: z.array(journalLineSchema).min(2).max(500),
 })
 
+export const journalCreateSchema = journalSchema.extend({ request_key: z.uuid() })
+export const journalUpdateSchema = journalSchema.extend({
+  version: z.coerce.number().int().positive(),
+})
+
 export const journalListQuerySchema = z.object({
   page: z.string().optional(),
   limit: z.string().optional(),

@@ -173,7 +173,7 @@ export class InvoiceRepository {
   }
   async findPurchase(connection: QueryExecutor, id: number, companyId: number, lock = false) {
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT pi.*,s.code supplier_code,s.name supplier_name,s.payable_account_id,w.code warehouse_code,w.name warehouse_name,u.name created_by_name FROM purchase_invoices pi INNER JOIN suppliers s ON s.id=pi.supplier_id LEFT JOIN warehouses w ON w.id=pi.warehouse_id INNER JOIN users u ON u.id=pi.created_by WHERE pi.id=? AND pi.company_id=? LIMIT 1 ${lock ? 'FOR UPDATE' : ''}`,
+      `SELECT pi.*,s.code supplier_code,s.name supplier_name,CASE WHEN pi.journal_id IS NOT NULL THEN pi.control_account_id ELSE s.payable_account_id END AS payable_account_id,w.code warehouse_code,w.name warehouse_name,u.name created_by_name FROM purchase_invoices pi INNER JOIN suppliers s ON s.id=pi.supplier_id LEFT JOIN warehouses w ON w.id=pi.warehouse_id INNER JOIN users u ON u.id=pi.created_by WHERE pi.id=? AND pi.company_id=? LIMIT 1 ${lock ? 'FOR UPDATE' : ''}`,
       [id, companyId],
     )
     return rows[0] ?? null
@@ -317,7 +317,7 @@ export class InvoiceRepository {
 
   async findSales(connection: QueryExecutor, id: number, companyId: number, lock = false) {
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT si.*, c.code AS customer_code, c.name AS customer_name, c.receivable_account_id, w.code AS warehouse_code, w.name AS warehouse_name, u.name AS created_by_name FROM sales_invoices si INNER JOIN customers c ON c.id = si.customer_id LEFT JOIN warehouses w ON w.id = si.warehouse_id INNER JOIN users u ON u.id = si.created_by WHERE si.id = ? AND si.company_id = ? LIMIT 1 ${lock ? 'FOR UPDATE' : ''}`,
+      `SELECT si.*, c.code AS customer_code, c.name AS customer_name, CASE WHEN si.journal_id IS NOT NULL THEN si.control_account_id ELSE c.receivable_account_id END AS receivable_account_id, w.code AS warehouse_code, w.name AS warehouse_name, u.name AS created_by_name FROM sales_invoices si INNER JOIN customers c ON c.id = si.customer_id LEFT JOIN warehouses w ON w.id = si.warehouse_id INNER JOIN users u ON u.id = si.created_by WHERE si.id = ? AND si.company_id = ? LIMIT 1 ${lock ? 'FOR UPDATE' : ''}`,
       [id, companyId],
     )
     return rows[0] ?? null

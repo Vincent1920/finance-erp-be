@@ -28,6 +28,7 @@ import {
   quantitySchema,
 } from '../validators/common.validator'
 import { BusinessValidationService } from './BusinessValidationService'
+import { AccountMappingService } from './AccountMappingService'
 
 const invoiceLineBaseSchema = z.object({
   itemId: positiveIdSchema,
@@ -250,6 +251,7 @@ export async function prepareImportedInvoice(
   repository: InvoiceRepository,
   validation: BusinessValidationService,
 ): Promise<PreparedImportedInvoice> {
+  const mappings = new AccountMappingService()
   if (!Number.isSafeInteger(companyId) || companyId <= 0) {
     throw new ValidationError('Company invoice tidak valid')
   }
@@ -263,7 +265,7 @@ export async function prepareImportedInvoice(
         : 'Pemasok tidak ditemukan atau tidak aktif',
     )
   }
-  if (String(party.currency).toUpperCase() !== input.currency) {
+  if (kind === 'sales' && String(party.currency).toUpperCase() !== input.currency) {
     throw new ValidationError(
       `Mata uang invoice harus sama dengan mata uang ${kind === 'sales' ? 'pelanggan' : 'pemasok'}`,
     )
@@ -311,12 +313,9 @@ export async function prepareImportedInvoice(
   const taxes = new Map(taxRows.map((tax) => [Number(tax.id), tax]))
   const accountIds: number[] = []
 
-  if (!party.control_account_id) {
-    throw new ValidationError(
-      `${kind === 'sales' ? 'Akun piutang pelanggan' : 'Akun utang pemasok'} belum dikonfigurasi`,
-    )
-  }
-  accountIds.push(Number(party.control_account_id))
+  accountIds.push(await mappings.resolve(connection, companyId, kind === 'sales' ? 'AR_CONTROL' : 'AP_CONTROL', party.control_account_id))
+
+  const resolvedLineAccounts = new Map<number, number>()
 
   for (const [index, line] of input.lines.entries()) {
     const item = items.get(line.itemId)!
@@ -331,7 +330,8 @@ export async function prepareImportedInvoice(
         : item.item_type === 'inventory'
           ? item.inventory_account_id
           : item.purchase_account_id
-    const accountId = line.accountId ?? (fallbackAccount ? Number(fallbackAccount) : null)
+    const mappingKey = kind === 'sales' ? 'REVENUE' : item.item_type === 'inventory' ? 'INVENTORY' : 'PURCHASE_EXPENSE'
+    const accountId = await mappings.resolve(connection, companyId, mappingKey, line.accountId ?? (fallbackAccount ? Number(fallbackAccount) : null))
     if (
       kind === 'purchase' &&
       item.item_type === 'inventory' &&
@@ -340,11 +340,7 @@ export async function prepareImportedInvoice(
       throw new ValidationError(
         `Barang persediaan pada baris ${index + 1} harus menggunakan akun persediaannya`,
       )
-    if (!accountId) {
-      throw new ValidationError(
-        `${kind === 'sales' ? 'Akun pendapatan' : 'Akun pembelian/beban'} pada baris ${index + 1} belum dikonfigurasi`,
-      )
-    }
+    resolvedLineAccounts.set(index, accountId)
     accountIds.push(accountId)
 
     if (line.taxCodeId) {
@@ -360,10 +356,7 @@ export async function prepareImportedInvoice(
         )
       if (compareDecimal(tax.rate, '0', 4) > 0) {
         const taxAccount = kind === 'sales' ? tax.output_tax_account_id : tax.input_tax_account_id
-        if (!taxAccount) {
-          throw new ValidationError(`Akun pajak pada baris ${index + 1} belum dikonfigurasi`)
-        }
-        accountIds.push(Number(taxAccount))
+        accountIds.push(await mappings.resolve(connection, companyId, kind === 'sales' ? 'OUTPUT_VAT' : 'INPUT_VAT', taxAccount ? Number(taxAccount) : null))
       }
     }
   }
@@ -396,15 +389,7 @@ export async function prepareImportedInvoice(
 
   const lines = input.lines.map<InvoiceLineWrite>((line, index) => {
     const item = items.get(line.itemId)!
-    const accountId =
-      line.accountId ??
-      Number(
-        kind === 'sales'
-          ? item.sales_account_id
-          : item.item_type === 'inventory'
-            ? item.inventory_account_id
-            : item.purchase_account_id,
-      )
+    const accountId = resolvedLineAccounts.get(index)!
     const calculated = calculatedLines[index]!
     return {
       lineNumber: index + 1,

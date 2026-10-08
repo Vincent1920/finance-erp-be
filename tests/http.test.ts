@@ -29,7 +29,14 @@ describe('HTTP smoke tests', () => {
     '/api/period-closing?year=2026',
     '/api/year-end',
     '/api/recurring-journals',
+    '/api/accounting-schedules',
+    '/api/accounting-schedules/templates',
+    '/api/accounting-schedules/alerts?as_of_date=2026-09-30',
+    '/api/approvals',
     '/api/month-end?as_of_date=2026-09-30',
+    '/api/month-end/export?as_of_date=2026-09-30',
+    '/api/reports/subledger-reconciliation?as_of_date=2026-09-30',
+    '/api/reports/subledger-reconciliation/detail?as_of_date=2026-09-30&reconciliation_type=ar&account_id=1',
     '/api/warehouses',
     '/api/units',
     '/api/tax-codes',
@@ -52,12 +59,33 @@ describe('HTTP smoke tests', () => {
     '/api/roles',
     '/api/permissions',
     '/api/settings',
+    '/api/settings/accounting-readiness',
+    '/api/settings/sequences',
   ]) {
     test(`${endpoint} is registered and protected`, async () => {
       const response = await app.request(endpoint)
       expect(response.status).toBe(401)
     })
   }
+  test('PATCH payroll employee status is registered and protected', async () => {
+    const response = await app.request('/api/payroll/employees/1/status', { method: 'PATCH' })
+    expect(response.status).toBe(401)
+  })
+  test('payroll bulk import and export endpoints are registered and protected', async () => {
+    for (const [method, path] of [
+      ['GET', '/api/payroll/import-template'],
+      ['POST', '/api/payroll/runs/1/import/preview'],
+      ['POST', '/api/payroll/runs/1/import'],
+      ['GET', '/api/payroll/runs/1/export/bank'],
+    ] as const) {
+      const response = await app.request(path, { method })
+      expect(response.status).toBe(401)
+    }
+  })
+  test('bank many-to-many matching endpoint is registered and protected', async () => {
+    const response = await app.request('/api/operations/bank-match-batch', { method: 'POST' })
+    expect(response.status).toBe(401)
+  })
   for (const endpoint of [
     '/api/operations/receivable-settlements/1',
     '/api/operations/payable-settlements/1',

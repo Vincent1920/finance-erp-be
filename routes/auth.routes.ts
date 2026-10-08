@@ -5,6 +5,9 @@ import { loginRateLimit } from '../middleware/login-rate-limit.middleware'
 const route = new Hono(),
   controller = new AuthController()
 route.post('/login', loginRateLimit, controller.login)
+route.get('/sessions',authMiddleware,controller.sessions)
+route.delete('/sessions/:id',authMiddleware,controller.revokeSession)
+route.post('/sessions/revoke-all',authMiddleware,controller.revokeAll)
 route.get('/me', authMiddleware, controller.me)
 route.post('/logout', authMiddleware, controller.logout)
 export default route

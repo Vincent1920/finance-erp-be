@@ -1,9 +1,16 @@
 import { z } from 'zod'
 
-export const taxPeriodSchema = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Masa pajak harus YYYY-MM')
+export const taxPeriodSchema = z
+  .string()
+  .regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Masa pajak harus YYYY-MM')
 export const taxTypeSchema = z.enum([
-  'ppn_output', 'ppn_input', 'pph',
-  'pph21_employee', 'pph21_non_employee', 'pph23', 'pph42',
+  'ppn_output',
+  'ppn_input',
+  'pph',
+  'pph21_employee',
+  'pph21_non_employee',
+  'pph23',
+  'pph42',
 ])
 
 export const taxReconciliationQuerySchema = z.object({
@@ -61,3 +68,20 @@ export const taxDocumentLinkSchema = z.object({
 export type TaxReportImportInput = z.output<typeof taxReportImportSchema>
 export type TaxResolutionInput = z.output<typeof taxResolutionSchema>
 export type TaxDocumentLinkInput = z.output<typeof taxDocumentLinkSchema>
+export const taxAmendmentSchema = z.object({
+  period: taxPeriodSchema,
+  reason: z.string().trim().min(10).max(1000),
+})
+export const taxPaymentSchema = z.object({
+  period: taxPeriodSchema,
+  tax_group: z.enum(['ppn', 'pph21', 'unification']),
+  date: z.iso.date(),
+  ntpn: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9]{16}$/, 'NTPN harus 16 karakter huruf/angka tanpa spasi'),
+  journal_id: z.coerce.number().int().positive(),
+  account_id: z.coerce.number().int().positive(),
+  amount: z.coerce.number().finite().positive().max(1e15),
+  notes: z.string().trim().max(500).default(''),
+})

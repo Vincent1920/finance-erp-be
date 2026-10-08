@@ -2,12 +2,15 @@ import type { Context } from 'hono'
 
 import { InventoryService } from '../services/InventoryService'
 import { ok, paginated } from '../utils/response'
+import { isoDateSchema } from '../validators/common.validator'
 import {
   inventoryCardQuerySchema,
   stockOverviewQuerySchema,
 } from '../validators/inventory.validator'
 
 export class InventoryController {
+  summary = async (c:Context) => ok(c, await this.service.summary(c.get('user').companyId,inventoryCardQuerySchema.parse(c.req.query())))
+  valuation = async (c: Context) => ok(c, await this.service.valuation(c.get('user').companyId, isoDateSchema.parse(c.req.query('as_of_date'))))
   constructor(private service = new InventoryService()) {}
 
   overview = async (c: Context) => {

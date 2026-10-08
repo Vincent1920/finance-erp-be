@@ -20,6 +20,7 @@ export const payrollEmployeeSchema = z.object({
     .nullable()
     .optional(),
   email: z.string().trim().email().nullable().optional(),
+  department_id: z.coerce.number().int().positive().nullable().optional(),
   department: z.string().trim().max(100).nullable().optional(),
   position: z.string().trim().max(100).nullable().optional(),
   employment_type: z.enum(['permanent', 'contract', 'non_employee']).default('permanent'),
@@ -35,6 +36,27 @@ export const payrollEmployeeSchema = z.object({
   basic_salary: money,
   fixed_allowance: money,
   is_active: z.boolean().default(true),
+  salary_effective_from: z.iso.date().optional(),
+  salary_change_reason: z
+    .string()
+    .trim()
+    .max(500)
+    .optional()
+    .refine((value) => !value || value.length >= 5, 'Alasan perubahan minimal 5 karakter')
+    .transform((value) => value || undefined),
+})
+export const payrollEmployeeStatusSchema = z.object({
+  is_active: z.boolean(),
+  effective_date: z.iso.date().nullable().optional(),
+  reason: z.string().trim().min(5, 'Alasan perubahan status minimal 5 karakter').max(500),
+}).superRefine((value, context) => {
+  if (!value.is_active && !value.effective_date)
+    context.addIssue({ code: 'custom', path: ['effective_date'], message: 'Tanggal berhenti wajib diisi' })
+})
+export const payrollProrationSchema = z.object({
+ proration_method:z.enum(['none','calendar','working_days']).default('none'),
+ working_weekdays:z.string().regex(/^[0-6](,[0-6])*$/).refine(v=>new Set(v.split(',')).size===v.split(',').length,'Hari kerja tidak boleh duplikat').default('1,2,3,4,5'),
+ prorate_bpjs:z.boolean().default(false),
 })
 export const payrollRunSchema = z.object({
   period: payrollPeriodSchema,
@@ -43,6 +65,9 @@ export const payrollRunSchema = z.object({
 })
 export const payrollEntryUpdateSchema = z
   .object({
+    custom_components: z.array(z.object({ id: z.coerce.number().int().positive().optional(), component_id: z.coerce.number().int().positive(), amount: money.default(0), taxable_amount: money.nullable().optional(), tax_note: z.string().trim().max(500).optional(), source_reference: z.string().trim().max(191).nullable().optional() })).max(100).optional(),
+    reimbursement_taxable: z.boolean().optional(),
+    absence_reduces_tax: z.boolean().optional(),
     variable_allowance: money.optional(),
     overtime: money.optional(),
     bonus: money.optional(),
@@ -75,6 +100,8 @@ export const payrollPolicySchema = z
     jkm_employer_rate: z.coerce.number().min(0).max(1),
     salary_expense_account_id: z.coerce.number().int().positive(),
     employer_bpjs_expense_account_id: z.coerce.number().int().positive(),
+    health_employer_expense_account_id: z.coerce.number().int().positive().nullable().optional(),
+    employment_employer_expense_account_id: z.coerce.number().int().positive().nullable().optional(),
     payroll_payable_account_id: z.coerce.number().int().positive(),
     bpjs_payable_account_id: z.coerce.number().int().positive(),
     pph21_payable_account_id: z.coerce.number().int().positive(),
@@ -122,3 +149,33 @@ export const payrollPaymentSchema = z.object({
   payment_account_id: z.coerce.number().int().positive(),
   payment_date: z.iso.date(),
 })
+export const payrollPolicySimulationSchema = z
+  .object({
+    health_employee_rate: z.coerce.number().min(0).max(1),
+    health_employer_rate: z.coerce.number().min(0).max(1),
+    health_wage_cap: money,
+    health_wage_floor: money.default(0),
+    jht_employee_rate: z.coerce.number().min(0).max(1),
+    jht_employer_rate: z.coerce.number().min(0).max(1),
+    jp_employee_rate: z.coerce.number().min(0).max(1),
+    jp_employer_rate: z.coerce.number().min(0).max(1),
+    jp_wage_cap: money,
+    jkk_employer_rate: z.coerce.number().min(0).max(1),
+    jkm_employer_rate: z.coerce.number().min(0).max(1),
+  })
+  .refine((value) => value.health_wage_floor <= value.health_wage_cap, {
+    path: ['health_wage_floor'],
+    message: 'Batas minimum tidak boleh melebihi batas maksimum upah Kesehatan',
+  })
+
+export const payrollComponentSchema = z.object({
+ code:z.string().trim().min(1).max(40), name:z.string().trim().min(2).max(191),
+ kind:z.enum(['earning','deduction']), channel:z.enum(['payroll','noncash','external_cash','external_noncash']),
+ basis:z.literal('nominal'), rate:z.literal(0).default(0),
+ taxable:z.boolean(), bpjs_base:z.boolean(),
+ expense_account_id:z.coerce.number().int().positive().nullable(), contra_account_id:z.coerce.number().int().positive().nullable(),
+ effective_from:z.iso.date(), effective_to:z.iso.date().nullable(),
+ policy_reference:z.string().trim().min(5).max(500), is_active:z.boolean(), version:z.coerce.number().int().positive().optional(),
+})
+
+export const payrollRecurringSchema=z.object({employee_id:z.coerce.number().int().positive(),component_id:z.coerce.number().int().positive(),amount:money,effective_from:z.iso.date(),effective_to:z.iso.date().nullable(),prorate:z.boolean(),is_active:z.boolean(),version:z.coerce.number().int().positive().optional()})

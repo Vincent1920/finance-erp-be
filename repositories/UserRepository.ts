@@ -1,3 +1,4 @@
+import {isPlatformOperator} from '../middleware/role.middleware'
 import type { RowDataPacket } from 'mysql2'
 
 import { db } from '../config/database'
@@ -19,9 +20,9 @@ interface SlugRow extends RowDataPacket {
 export class UserRepository {
   async findByEmail(email: string) {
     const [rows] = await db.execute<UserRow[]>(
-      `SELECT *
-       FROM users
-       WHERE email = ? AND deleted_at IS NULL
+      `SELECT u.*, c.base_currency
+       FROM users u JOIN companies c ON c.id=u.company_id
+       WHERE u.email = ? AND u.deleted_at IS NULL
        LIMIT 1`,
       [email],
     )
@@ -83,7 +84,7 @@ export class UserRepository {
 
   async freshAuthUser(id: number, companyId: number) {
     const [rows] = await db.execute<UserRow[]>(
-      `SELECT u.id, u.company_id, u.name, u.email, u.status, u.failed_login_attempts
+      `SELECT u.id, u.company_id, u.name, u.email, u.status, u.failed_login_attempts,c.base_currency
        FROM users u
        INNER JOIN companies c ON c.id = u.company_id
        WHERE u.id = ? AND u.company_id = ? AND u.deleted_at IS NULL
@@ -96,6 +97,8 @@ export class UserRepository {
     return {
       id: user.id,
       companyId: user.company_id,
+      isPlatformOperator:isPlatformOperator(Number(user.id)),
+      baseCurrency: String(user.base_currency ?? 'IDR'),
       name: user.name,
       email: user.email,
       ...access,

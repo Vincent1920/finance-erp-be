@@ -160,7 +160,9 @@ export class InventoryRepository {
       dateTo: string
       page?: string
       limit?: string
+      search?: string
     },
+    connection: QueryExecutor = db,
   ) {
     const { page, limit, offset } = pagination(query.page, query.limit)
     const selectedItemIds = query.itemIds?.length
@@ -175,7 +177,7 @@ export class InventoryRepository {
     const baseValues: Array<string | number> = [companyId]
     baseValues.push(...selectedItemIds)
     if (query.warehouseId) baseValues.push(query.warehouseId)
-    const [openingRows] = await db.execute<RowDataPacket[]>(
+    const [openingRows] = await connection.execute<RowDataPacket[]>(
       `SELECT
          COALESCE(SUM(im.quantity_in - im.quantity_out), 0) AS opening_quantity,
          COALESCE(SUM(CASE WHEN im.quantity_in > 0 THEN im.total_cost ELSE -im.total_cost END), 0)
@@ -185,7 +187,7 @@ export class InventoryRepository {
          AND im.movement_date < ?`,
       [...baseValues, query.dateFrom],
     )
-    const [rows] = await db.query<RowDataPacket[]>(
+    const [rows] = await connection.query<RowDataPacket[]>(
       `WITH movements AS (
          SELECT
            im.id, im.movement_date, im.transaction_type, im.transaction_number,
@@ -250,11 +252,14 @@ export class InventoryRepository {
          FROM movements m
          WHERE m.movement_date>=?
        )
-       SELECT report_rows.*, COUNT(*) OVER () AS total_rows
+       SELECT report_rows.*, CAST(quantity_in AS CHAR) quantity_in, CAST(quantity_out AS CHAR) quantity_out,
+         CAST(chronological_quantity AS CHAR) chronological_quantity, CAST(chronological_value AS CHAR) chronological_value,
+         CAST(unit_cost AS CHAR) unit_cost, CAST(total_cost AS CHAR) total_cost, COUNT(*) OVER () AS total_rows
        FROM report_rows
+       ${query.search ? 'WHERE (sku LIKE ? OR item_name LIKE ? OR transaction_number LIKE ?)' : ''}
        ORDER BY movement_date,sort_order,sku,warehouse_code,id
        LIMIT ? OFFSET ?`,
-      [...baseValues, query.dateTo, query.dateFrom, query.dateFrom, query.dateFrom, limit, offset],
+      [...baseValues, query.dateTo, query.dateFrom, query.dateFrom, query.dateFrom, ...(query.search ? Array(3).fill(`%${query.search}%`) : []), limit, offset],
     )
     return {
       rows,

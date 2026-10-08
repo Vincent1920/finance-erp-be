@@ -1,16 +1,21 @@
+import { assertManualAccounts } from './CoaControlService'
+import { randomUUID } from 'node:crypto'
 import { transaction } from '../config/database'
 import { JournalRepository, type JournalRow } from '../repositories/JournalRepository'
 import type { QueryExecutor } from '../types/database'
 import { ConflictError, NotFoundError } from '../utils/AppError'
 import type { z } from 'zod'
 
-import type { journalSchema } from '../validators/journal.validator'
+import type { journalSchema, journalUpdateSchema } from '../validators/journal.validator'
 import { AuditService } from './AuditService'
 import { BusinessValidationService } from './BusinessValidationService'
 import { NumberSequenceService } from './NumberSequenceService'
 import { PostingService, assertBalanced, type PostingContext } from './PostingService'
+import { idempotentOperation } from './IdempotentOperation'
 
 type JournalInput = z.infer<typeof journalSchema>
+type JournalCreateInput = JournalInput & { request_key?: string }
+type JournalUpdateInput = z.infer<typeof journalUpdateSchema>
 
 export class JournalService {
   constructor(
@@ -50,9 +55,13 @@ export class JournalService {
     return journal
   }
 
-  async create(companyId: number, input: JournalInput, context: PostingContext) {
-    return transaction((connection) =>
-      this.createInTransaction(connection, companyId, input, context),
+  async create(companyId: number, input: JournalCreateInput, context: PostingContext) {
+    return idempotentOperation<{ id: number; journalNumber: string; status: 'draft' }>(
+      companyId,
+      input.request_key ?? context.requestId ?? randomUUID(),
+      'journal-create',
+      input,
+      (connection) => this.createInTransaction(connection, companyId, input, context),
     )
   }
 
@@ -63,6 +72,7 @@ export class JournalService {
     context: PostingContext,
   ) {
     await this.validation.ensureOpenPeriod(connection, companyId, input.journal_date)
+    await assertManualAccounts(connection, companyId, input.lines.map(line => line.accountId))
     const totals = await this.posting.validateLines(connection, companyId, input.lines)
     const number = await this.sequences.next(connection, companyId, 'journal', input.journal_date)
     const id = await this.repository.create(connection, {
@@ -93,10 +103,15 @@ export class JournalService {
     return { id, journalNumber: number, status: 'draft' as const }
   }
 
-  async update(id: number, companyId: number, input: JournalInput, context: PostingContext) {
+  async update(id: number, companyId: number, input: JournalUpdateInput, context: PostingContext) {
     await transaction(async (connection) => {
       const journal = await this.repository.findForUpdate(connection, id, companyId)
       if (!journal) throw new NotFoundError('Jurnal tidak ditemukan')
+      if (Number(journal.version) !== input.version) {
+        throw new ConflictError(
+          'Jurnal telah diubah oleh pengguna lain. Muat ulang halaman sebelum menyimpan kembali.',
+        )
+      }
       this.ensureManual(journal.source_type)
       if (!['draft', 'rejected'].includes(journal.status)) {
         throw new ConflictError('Hanya jurnal draft atau rejected yang dapat diubah')
@@ -107,7 +122,8 @@ export class JournalService {
         this.dateOnly(journal.journal_date),
       )
       await this.validation.ensureOpenPeriod(connection, companyId, input.journal_date)
-      const totals = await this.posting.validateLines(connection, companyId, input.lines)
+      await assertManualAccounts(connection, companyId, input.lines.map(line => line.accountId))
+    const totals = await this.posting.validateLines(connection, companyId, input.lines)
       await this.repository.updateDraft(connection, id, {
         date: input.journal_date,
         reference: input.reference,
@@ -306,7 +322,17 @@ export class JournalService {
   }
 
   private ensureWorkflowSource(sourceType: string | null) {
-    if (sourceType && sourceType !== 'recurring_journal')
+    if (
+      sourceType &&
+      ![
+        'recurring_journal',
+        'accounting_schedule',
+        'accounting_schedule_reversal',
+        'accounting_schedule_adjustment',
+        'equity_transaction',
+        'opening_balance',
+      ].includes(sourceType)
+    )
       throw new ConflictError('Jurnal sumber transaksi dikelola dari dokumen asal')
   }
 

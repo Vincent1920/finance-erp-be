@@ -2,6 +2,8 @@ import type { RowDataPacket } from 'mysql2/promise'
 
 import { db } from '../config/database'
 import { pagination } from '../utils/pagination'
+import { ValidationError } from '../utils/AppError'
+import type { QueryExecutor } from '../types/database'
 
 export interface DateRange {
   dateFrom: string
@@ -32,8 +34,9 @@ export interface TrialBalanceRow extends RowDataPacket {
 }
 
 export class ReportRepository {
+  constructor(private connection: QueryExecutor = db) {}
   async companyReportingSettings(companyId: number) {
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
       `SELECT fiscal_year_start, base_currency
        FROM companies
        WHERE id = ?
@@ -43,7 +46,7 @@ export class ReportRepository {
     return rows[0] ?? { fiscal_year_start: 1, base_currency: 'IDR' }
   }
 
-  async generalLedger(companyId: number, filters: LedgerFilters) {
+  async generalLedger(companyId: number, filters: LedgerFilters, connection: QueryExecutor = this.connection) {
     const { page, limit, offset } = pagination(filters.page, filters.limit)
     const conditions = [
       'j.company_id = ?',
@@ -81,7 +84,7 @@ export class ReportRepository {
       : ''
     const searchValues = filters.reference ? Array(5).fill('%' + filters.reference + '%') : []
 
-    const [rows] = await db.query<RowDataPacket[]>(
+    const [rows] = await connection.query<RowDataPacket[]>(
       `WITH opening AS (
          SELECT jl.account_id, COALESCE(SUM(jl.debit - jl.credit), 0) AS balance
          FROM journal_lines jl
@@ -97,6 +100,7 @@ export class ReportRepository {
            a.normal_balance,
            j.id AS journal_id,
            j.journal_number,
+           company.base_currency AS report_currency,
            j.journal_date,
            j.reference,
            j.source_type,
@@ -112,6 +116,7 @@ export class ReportRepository {
          FROM journal_lines jl
          INNER JOIN journals j ON j.id = jl.journal_id
          INNER JOIN accounts a ON a.id = jl.account_id AND a.company_id = j.company_id
+         INNER JOIN companies company ON company.id = j.company_id
          LEFT JOIN opening o ON o.account_id = jl.account_id
          LEFT JOIN cost_centers cc ON cc.id = jl.cost_center_id AND cc.company_id = j.company_id
          LEFT JOIN projects p ON p.id = jl.project_id AND p.company_id = j.company_id
@@ -122,9 +127,10 @@ export class ReportRepository {
            PARTITION BY account_id ORDER BY journal_date, journal_id, id
          ) AS running_balance
        FROM entries)
-       SELECT balances.*, COUNT(*) OVER () AS total_rows FROM balances
+       SELECT balances.*, CAST(debit AS CHAR) AS debit, CAST(credit AS CHAR) AS credit,
+         CAST(running_balance AS CHAR) AS running_balance, COUNT(*) OVER () AS total_rows FROM balances
        ${searchCondition}
-       ORDER BY account_code, journal_date, journal_id, id
+       ORDER BY journal_number, journal_id, id
        LIMIT ? OFFSET ?`,
       [...openingValues, ...values, ...searchValues, limit, offset],
     )
@@ -133,7 +139,7 @@ export class ReportRepository {
   }
 
   async trialBalance(companyId: number, range: DateRange): Promise<TrialBalanceRow[]> {
-    const [rows] = await db.execute<TrialBalanceRow[]>(
+    const [rows] = await this.connection.execute<TrialBalanceRow[]>(
       `WITH balances AS (
          SELECT
            a.id,
@@ -141,6 +147,7 @@ export class ReportRepository {
            a.name,
            a.account_type,
            a.normal_balance,
+           a.presentation_order,
            COALESCE(SUM(CASE WHEN j.journal_date < ? THEN jl.debit ELSE 0 END), 0) AS opening_debit,
            COALESCE(SUM(CASE WHEN j.journal_date < ? THEN jl.credit ELSE 0 END), 0) AS opening_credit,
            COALESCE(SUM(CASE WHEN j.journal_date BETWEEN ? AND ? THEN jl.debit ELSE 0 END), 0)
@@ -157,7 +164,7 @@ export class ReportRepository {
          WHERE a.company_id = ?
            AND a.deleted_at IS NULL
            AND a.is_posting = TRUE
-         GROUP BY a.id, a.code, a.name, a.account_type, a.normal_balance
+         GROUP BY a.id, a.code, a.name, a.account_type, a.normal_balance, a.presentation_order
        )
        SELECT
          balances.*,
@@ -166,7 +173,7 @@ export class ReportRepository {
          GREATEST((opening_credit + period_credit) - (opening_debit + period_debit), 0)
            AS ending_credit
        FROM balances
-       ORDER BY code`,
+       ORDER BY FIELD(account_type,'asset','liability','equity','revenue','cogs','expense','other_income','other_expense'),COALESCE(presentation_order,990000),code`,
       [
         range.dateFrom,
         range.dateFrom,
@@ -181,8 +188,8 @@ export class ReportRepository {
     return rows
   }
 
-  async accountMovements(companyId: number, range: DateRange) {
-    const [rows] = await db.execute<RowDataPacket[]>(
+  async accountMovements(companyId: number, range: DateRange, excludeYearEnd = false) {
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
       `SELECT
          a.id,
          a.code,
@@ -199,18 +206,19 @@ export class ReportRepository {
         AND j.company_id = a.company_id
         AND j.status IN ('posted','reversed')
         AND j.journal_date BETWEEN ? AND ?
+        AND (? = FALSE OR COALESCE(j.source_type, '') NOT IN ('year_end_closing','year_end_retained_earnings','year_end_closing_reversal','year_end_retained_reversal'))
        WHERE a.company_id = ?
          AND a.deleted_at IS NULL
          AND a.is_posting = TRUE
        GROUP BY a.id, a.code, a.name, a.account_type, a.normal_balance, a.report_group
-       ORDER BY a.code`,
-      [range.dateFrom, range.dateTo, companyId],
+       ORDER BY FIELD(a.account_type,'asset','liability','equity','revenue','cogs','expense','other_income','other_expense'),COALESCE(a.presentation_order,990000),a.code`,
+      [range.dateFrom, range.dateTo, excludeYearEnd, companyId],
     )
     return rows
   }
 
   async accountBalancesAsOf(companyId: number, asOfDate: string) {
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
       `SELECT
          a.id,
          a.code,
@@ -230,14 +238,14 @@ export class ReportRepository {
          AND a.deleted_at IS NULL
          AND a.is_posting = TRUE
        GROUP BY a.id, a.code, a.name, a.account_type, a.normal_balance
-       ORDER BY a.code`,
+       ORDER BY FIELD(a.account_type,'asset','liability','equity','revenue','cogs','expense','other_income','other_expense'),COALESCE(a.presentation_order,990000),a.code`,
       [asOfDate, companyId],
     )
     return rows
   }
 
   async cashFlow(companyId: number, range: DateRange) {
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
       `WITH cash_accounts AS (
          SELECT DISTINCT a.id
          FROM accounts a
@@ -299,7 +307,7 @@ export class ReportRepository {
        GROUP BY ja.activity`,
       [companyId, companyId, companyId, range.dateFrom, range.dateTo],
     )
-    const [balanceRows] = await db.execute<RowDataPacket[]>(
+    const [balanceRows] = await this.connection.execute<RowDataPacket[]>(
       `SELECT
          COALESCE(SUM(CASE WHEN j.journal_date < ? THEN jl.debit - jl.credit ELSE 0 END), 0)
            AS opening_balance,
@@ -336,7 +344,7 @@ export class ReportRepository {
     const returnTable = sales ? 'sales_returns' : 'purchase_returns'
     const returnInvoiceKey = sales ? 'sales_invoice_id' : 'purchase_invoice_id'
 
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
       `SELECT
          i.id,
          i.invoice_number,
@@ -345,7 +353,9 @@ export class ReportRepository {
          p.id AS party_id,
          p.code AS party_code,
          p.name AS party_name,
-         i.currency,
+         company.base_currency AS currency,
+         i.currency AS transaction_currency,
+         i.exchange_rate,
          i.base_grand_total AS original_amount,
          COALESCE(payments.paid_amount, 0) AS paid_amount,
          COALESCE(returns.returned_amount, 0) AS returned_amount,
@@ -365,6 +375,7 @@ export class ReportRepository {
            ELSE '>90'
          END AS aging_bucket
        FROM ${headerTable} i
+       INNER JOIN companies company ON company.id=i.company_id
        INNER JOIN ${partyTable} p ON p.id = i.${partyForeignKey} AND p.company_id = i.company_id
        LEFT JOIN (
          SELECT a.${allocationInvoiceKey} AS invoice_id, SUM(a.base_amount) AS paid_amount
@@ -404,9 +415,9 @@ export class ReportRepository {
         asOfDate,
         companyId,
         asOfDate,
-        side === 'receivable' ? 'customer' : 'supplier',
         companyId,
         asOfDate,
+        side === 'receivable' ? 'customer' : 'supplier',
         companyId,
         asOfDate,
       ],
@@ -416,7 +427,7 @@ export class ReportRepository {
 
   async inventoryValuation(companyId: number, asOfDate?: string) {
     if (!asOfDate) {
-      const [rows] = await db.execute<RowDataPacket[]>(
+      const [rows] = await this.connection.execute<RowDataPacket[]>(
         `SELECT
            ib.item_id,
            i.sku,
@@ -442,7 +453,7 @@ export class ReportRepository {
       )
       return rows
     }
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
       `SELECT
          im.item_id,
          i.sku,
@@ -470,36 +481,46 @@ export class ReportRepository {
   }
 
   async subledgerReconciliation(companyId: number, asOfDate: string) {
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [unvalued]=await this.connection.execute<RowDataPacket[]>(`SELECT b.code,
+      COALESCE((SELECT s.closing_balance FROM bank_statements s WHERE s.company_id=b.company_id AND s.bank_account_id=b.id AND s.period_end<=? ORDER BY s.period_end DESC,s.id DESC LIMIT 1),0) statement_balance,
+      COALESCE((SELECT SUM(l.currency_debit-l.currency_credit) FROM journal_lines l JOIN journals j ON j.id=l.journal_id WHERE j.company_id=b.company_id AND l.account_id=b.gl_account_id AND j.status IN('posted','reversed') AND j.journal_date<=? AND l.currency_code=b.currency),0) native_balance
+      FROM bank_accounts b JOIN companies c ON c.id=b.company_id WHERE b.company_id=? AND b.is_active=TRUE AND b.deleted_at IS NULL AND b.currency<>c.base_currency
+      HAVING statement_balance<>0 AND native_balance=0`,[asOfDate,asOfDate,companyId])
+    if(unvalued.length)throw new ValidationError(`Rekening valas ${unvalued.map(b=>b.code).join(', ')} memiliki saldo rekening koran tanpa saldo valuta di buku. Lengkapi transaksi/migrasi valuta sebelum membandingkan nilai rupiah.`)
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
       `WITH gl AS (
-         SELECT jl.account_id, COALESCE(SUM(jl.debit - jl.credit), 0) AS debit_balance
+         SELECT jl.account_id, COALESCE(SUM(jl.debit - jl.credit), 0) AS debit_balance,
+           SUM(CASE WHEN jl.currency_code IS NOT NULL THEN jl.currency_debit-jl.currency_credit ELSE 0 END) native_balance
          FROM journal_lines jl
          INNER JOIN journals j ON j.id = jl.journal_id
          WHERE j.company_id = ? AND j.status IN ('posted','reversed') AND j.journal_date <= ?
          GROUP BY jl.account_id
        ), control_accounts AS (
-         SELECT 'ar' reconciliation_type,c.receivable_account_id account_id FROM customers c WHERE c.company_id=? AND c.receivable_account_id IS NOT NULL GROUP BY c.receivable_account_id
-         UNION SELECT 'ap',s.payable_account_id FROM suppliers s WHERE s.company_id=? AND s.payable_account_id IS NOT NULL GROUP BY s.payable_account_id
+         SELECT 'ar' reconciliation_type,c.control_account_id account_id FROM (SELECT company_id,receivable_account_id control_account_id FROM customers UNION SELECT company_id,control_account_id FROM sales_invoices) c WHERE c.company_id=? AND c.control_account_id IS NOT NULL GROUP BY c.control_account_id
+         UNION SELECT 'ap',s.control_account_id FROM (SELECT company_id,payable_account_id control_account_id FROM suppliers UNION SELECT company_id,control_account_id FROM purchase_invoices) s WHERE s.company_id=? AND s.control_account_id IS NOT NULL GROUP BY s.control_account_id
          UNION SELECT 'inventory',i.inventory_account_id FROM items i WHERE i.company_id=? AND i.inventory_account_id IS NOT NULL GROUP BY i.inventory_account_id
          UNION SELECT 'bank',b.gl_account_id FROM bank_accounts b WHERE b.company_id=? AND b.is_active=TRUE AND b.deleted_at IS NULL GROUP BY b.gl_account_id
        ), subledger AS (
-         SELECT 'ar' reconciliation_type,c.receivable_account_id account_id,
+         SELECT 'ar' reconciliation_type,si.control_account_id account_id,
            COALESCE(SUM(si.base_grand_total),0)
-           -COALESCE((SELECT SUM(a.base_amount) FROM customer_payment_allocations a JOIN customer_payments p ON p.id=a.customer_payment_id JOIN sales_invoices x ON x.id=a.sales_invoice_id JOIN customers cp ON cp.id=x.customer_id WHERE p.company_id=? AND p.status='posted' AND p.payment_date<=? AND cp.receivable_account_id=c.receivable_account_id),0)
-           -COALESCE((SELECT SUM(r.base_grand_total) FROM sales_returns r JOIN customers cr ON cr.id=r.customer_id WHERE r.company_id=? AND r.status='posted' AND r.return_date<=? AND cr.receivable_account_id=c.receivable_account_id),0)
-           +COALESCE((SELECT SUM(a.base_amount) FROM party_credit_applications a JOIN party_credits pc ON pc.id=a.party_credit_id WHERE a.company_id=? AND pc.party_type='customer' AND pc.control_account_id=c.receivable_account_id AND a.application_type='refund' AND a.status='posted' AND a.application_date<=?),0) amount
-         FROM customers c LEFT JOIN sales_invoices si ON si.customer_id=c.id AND si.company_id=c.company_id AND si.invoice_date<=? AND si.status IN('posted','partially_paid','paid') WHERE c.company_id=? AND c.receivable_account_id IS NOT NULL GROUP BY c.receivable_account_id
+           -COALESCE((SELECT SUM(a.base_amount) FROM customer_payment_allocations a JOIN customer_payments p ON p.id=a.customer_payment_id JOIN sales_invoices x ON x.id=a.sales_invoice_id JOIN customers cp ON cp.id=x.customer_id WHERE p.company_id=? AND p.status='posted' AND p.payment_date<=? AND x.control_account_id=si.control_account_id),0)
+           -COALESCE((SELECT SUM(r.base_grand_total) FROM sales_returns r JOIN sales_invoices rx ON rx.id=r.sales_invoice_id AND rx.company_id=r.company_id WHERE r.company_id=? AND r.status='posted' AND r.return_date<=? AND rx.control_account_id=si.control_account_id),0)
+           +COALESCE((SELECT SUM(a.base_amount) FROM party_credit_applications a JOIN party_credits pc ON pc.id=a.party_credit_id WHERE a.company_id=? AND pc.party_type='customer' AND pc.control_account_id=si.control_account_id AND a.application_type='refund' AND a.status='posted' AND a.application_date<=?),0) amount
+         FROM sales_invoices si WHERE si.invoice_date<=? AND si.status IN('posted','partially_paid','paid') AND si.company_id=? AND si.control_account_id IS NOT NULL GROUP BY si.control_account_id
          UNION ALL
-         SELECT 'ap',s.payable_account_id,
+         SELECT 'ap',pi.control_account_id,
            COALESCE(SUM(pi.base_grand_total),0)
-           -COALESCE((SELECT SUM(a.base_amount) FROM supplier_payment_allocations a JOIN supplier_payments p ON p.id=a.supplier_payment_id JOIN purchase_invoices x ON x.id=a.purchase_invoice_id JOIN suppliers sp ON sp.id=x.supplier_id WHERE p.company_id=? AND p.status='posted' AND p.payment_date<=? AND sp.payable_account_id=s.payable_account_id),0)
-           -COALESCE((SELECT SUM(r.base_grand_total) FROM purchase_returns r JOIN suppliers sr ON sr.id=r.supplier_id WHERE r.company_id=? AND r.status='posted' AND r.return_date<=? AND sr.payable_account_id=s.payable_account_id),0)
-           +COALESCE((SELECT SUM(a.base_amount) FROM party_credit_applications a JOIN party_credits pc ON pc.id=a.party_credit_id WHERE a.company_id=? AND pc.party_type='supplier' AND pc.control_account_id=s.payable_account_id AND a.application_type='refund' AND a.status='posted' AND a.application_date<=?),0)
-         FROM suppliers s LEFT JOIN purchase_invoices pi ON pi.supplier_id=s.id AND pi.company_id=s.company_id AND pi.invoice_date<=? AND pi.status IN('posted','partially_paid','paid') WHERE s.company_id=? AND s.payable_account_id IS NOT NULL GROUP BY s.payable_account_id
+           -COALESCE((SELECT SUM(a.base_amount) FROM supplier_payment_allocations a JOIN supplier_payments p ON p.id=a.supplier_payment_id JOIN purchase_invoices x ON x.id=a.purchase_invoice_id JOIN suppliers sp ON sp.id=x.supplier_id WHERE p.company_id=? AND p.status='posted' AND p.payment_date<=? AND x.control_account_id=pi.control_account_id),0)
+           -COALESCE((SELECT SUM(r.base_grand_total) FROM purchase_returns r JOIN purchase_invoices rx ON rx.id=r.purchase_invoice_id AND rx.company_id=r.company_id WHERE r.company_id=? AND r.status='posted' AND r.return_date<=? AND rx.control_account_id=pi.control_account_id),0)
+           +COALESCE((SELECT SUM(a.base_amount) FROM party_credit_applications a JOIN party_credits pc ON pc.id=a.party_credit_id WHERE a.company_id=? AND pc.party_type='supplier' AND pc.control_account_id=pi.control_account_id AND a.application_type='refund' AND a.status='posted' AND a.application_date<=?),0)
+         FROM purchase_invoices pi WHERE pi.invoice_date<=? AND pi.status IN('posted','partially_paid','paid') AND pi.company_id=? AND pi.control_account_id IS NOT NULL GROUP BY pi.control_account_id
          UNION ALL
          SELECT 'inventory',i.inventory_account_id,SUM(CASE WHEN im.quantity_in>0 THEN im.total_cost ELSE -im.total_cost END) FROM inventory_movements im JOIN items i ON i.id=im.item_id AND i.company_id=im.company_id WHERE im.company_id=? AND im.movement_date<=? AND i.inventory_account_id IS NOT NULL GROUP BY i.inventory_account_id
          UNION ALL
-         SELECT 'bank',b.gl_account_id,COALESCE(SUM((SELECT bs.closing_balance FROM bank_statements bs WHERE bs.company_id=b.company_id AND bs.bank_account_id=b.id AND bs.period_end<=? ORDER BY bs.period_end DESC,bs.id DESC LIMIT 1)),0) FROM bank_accounts b WHERE b.company_id=? AND b.is_active=TRUE AND b.deleted_at IS NULL GROUP BY b.gl_account_id
+         SELECT 'bank',b.gl_account_id,COALESCE(SUM((SELECT bs.closing_balance FROM bank_statements bs WHERE bs.company_id=b.company_id AND bs.bank_account_id=b.id AND bs.period_end<=? ORDER BY bs.period_end DESC,bs.id DESC LIMIT 1)
+           * CASE WHEN b.currency=c.base_currency THEN 1 ELSE COALESCE(g.debit_balance/NULLIF(g.native_balance,0),0) END),0)
+         FROM bank_accounts b JOIN companies c ON c.id=b.company_id LEFT JOIN gl g ON g.account_id=b.gl_account_id
+         WHERE b.company_id=? AND b.is_active=TRUE AND b.deleted_at IS NULL GROUP BY b.gl_account_id
        )
        SELECT ca.reconciliation_type,a.id account_id,a.code account_code,a.name account_name,COALESCE(s.amount,0) subledger,
          CASE WHEN ca.reconciliation_type='ap' THEN -COALESCE(gl.debit_balance,0) ELSE COALESCE(gl.debit_balance,0) END general_ledger
@@ -537,6 +558,60 @@ export class ReportRepository {
     return rows
   }
 
+  async fixedAssetReconciliation(companyId: number, asOfDate: string) {
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
+      `WITH gl AS (
+         SELECT jl.account_id,COALESCE(SUM(jl.debit-jl.credit),0) debit_balance
+           FROM journal_lines jl JOIN journals j ON j.id=jl.journal_id
+          WHERE j.company_id=? AND j.status IN('posted','reversed') AND j.journal_date<=?
+          GROUP BY jl.account_id
+       ), asset_cost AS (
+         SELECT fa.asset_account_id account_id,SUM(fa.purchase_cost) amount
+           FROM fixed_assets fa
+          WHERE fa.company_id=? AND fa.deleted_at IS NULL AND fa.in_service_date<=?
+            AND fa.status<>'draft' AND (fa.disposal_date IS NULL OR fa.disposal_date>?)
+          GROUP BY fa.asset_account_id
+       ), accumulated AS (
+         SELECT fa.accumulated_depreciation_account_id account_id,SUM(ad.depreciation_amount) amount
+           FROM asset_depreciations ad JOIN fixed_assets fa ON fa.id=ad.fixed_asset_id
+          WHERE ad.company_id=? AND ad.status='posted' AND ad.depreciation_date<=?
+            AND fa.deleted_at IS NULL AND (fa.disposal_date IS NULL OR fa.disposal_date>?)
+          GROUP BY fa.accumulated_depreciation_account_id
+       )
+       SELECT 'fixed_asset' reconciliation_type,a.id account_id,a.code account_code,a.name account_name,
+              ac.amount subledger,COALESCE(gl.debit_balance,0) general_ledger
+         FROM asset_cost ac JOIN accounts a ON a.id=ac.account_id LEFT JOIN gl ON gl.account_id=ac.account_id
+       UNION ALL
+       SELECT 'accumulated_depreciation',a.id,a.code,a.name,ad.amount,-COALESCE(gl.debit_balance,0)
+         FROM accumulated ad JOIN accounts a ON a.id=ad.account_id LEFT JOIN gl ON gl.account_id=ad.account_id
+       ORDER BY account_code`,
+      [companyId, asOfDate, companyId, asOfDate, asOfDate, companyId, asOfDate, asOfDate],
+    )
+    return rows
+  }
+
+  async payrollReconciliation(companyId: number, asOfDate: string) {
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
+      `WITH gl AS (
+         SELECT jl.account_id,COALESCE(SUM(jl.debit-jl.credit),0) debit_balance
+           FROM journal_lines jl JOIN journals j ON j.id=jl.journal_id
+          WHERE j.company_id=? AND j.status IN('posted','reversed') AND j.journal_date<=?
+          GROUP BY jl.account_id
+       ), payroll_due AS (
+         SELECT pp.payroll_payable_account_id account_id,SUM(pr.total_take_home_pay) amount
+           FROM payroll_runs pr JOIN payroll_policies pp ON pp.id=pr.policy_id
+          WHERE pr.company_id=? AND pr.status='posted' AND pr.date_to<=?
+          GROUP BY pp.payroll_payable_account_id
+       )
+       SELECT 'payroll' reconciliation_type,a.id account_id,a.code account_code,a.name account_name,
+              p.amount subledger,-COALESCE(gl.debit_balance,0) general_ledger
+         FROM payroll_due p JOIN accounts a ON a.id=p.account_id LEFT JOIN gl ON gl.account_id=p.account_id
+        ORDER BY a.code`,
+      [companyId, asOfDate, companyId, asOfDate],
+    )
+    return rows
+  }
+
   async budgetVsActual(
     companyId: number,
     filters: DateRange & { accountId?: number; costCenterId?: number; projectId?: number },
@@ -555,7 +630,7 @@ export class ReportRepository {
       conditions.push('bl.project_id = ?')
       values.push(filters.projectId)
     }
-    const [rows] = await db.execute<RowDataPacket[]>(
+    const [rows] = await this.connection.execute<RowDataPacket[]>(
       `SELECT
          bl.account_id,
          a.code AS account_code,

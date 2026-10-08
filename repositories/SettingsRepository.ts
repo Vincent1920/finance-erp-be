@@ -92,25 +92,21 @@ export class SettingsRepository {
       prefix: string
       padding: number
       reset_period: string
-      current_number?: number
     },
     connection: QueryExecutor,
   ) {
     await connection.execute(
       `INSERT INTO number_sequences (
          company_id, sequence_key, prefix, current_number, padding, reset_period
-       ) VALUES (?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, 0, ?, ?)
        ON DUPLICATE KEY UPDATE
-         prefix = VALUES(prefix), padding = VALUES(padding), reset_period = VALUES(reset_period),
-         current_number = IF(? IS NULL, current_number, VALUES(current_number))`,
+         prefix = VALUES(prefix), padding = VALUES(padding), reset_period = VALUES(reset_period)`,
       [
         companyId,
         input.sequence_key,
         input.prefix,
-        input.current_number ?? 0,
         input.padding,
         input.reset_period,
-        input.current_number ?? null,
       ],
     )
     const [rows] = await connection.execute<RowDataPacket[]>(

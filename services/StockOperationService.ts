@@ -11,6 +11,7 @@ import { idempotentOperation } from './IdempotentOperation'
 import { ConflictError, NotFoundError, ValidationError } from '../utils/AppError'
 import { compareDecimal, subtractDecimal, multiplyDecimal } from '../utils/decimal'
 import type { ReversalInput, StockOperationInput } from '../validators/operations.validator'
+import { AccountMappingService } from './AccountMappingService'
 
 type StockLine = NonNullable<StockOperationInput['lines']>[number]
 const dateOnly = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10)
@@ -92,7 +93,7 @@ export class StockOperationService {
           for (const warehouse of [input.warehouse_id, input.to_warehouse_id].sort((a, b) => a - b)) await repo.lockBalance(connection, companyId, line.item_id, warehouse)
           const common = { companyId, itemId: line.item_id, quantity: stockQuantity, transactionType: type, transactionId: created.insertId, transactionNumber: number, movementDate: input.date, reference: input.reference, userId: context.userId }
           const out = await costing.applyMovement(connection, { ...common, warehouseId: input.warehouse_id, direction: 'out', postingKey: `${type}:${created.insertId}:${index + 1}:out` })
-          const incoming = await costing.applyMovement(connection, { ...common, warehouseId: input.to_warehouse_id, direction: 'in', unitCost: out.unitCost, postingKey: `${type}:${created.insertId}:${index + 1}:in` })
+          const incoming = await costing.applyMovement(connection, { ...common, warehouseId: input.to_warehouse_id, direction: 'in', unitCost: out.unitCost, totalCostOverride: out.totalCost, costSlices: out.costSlices, postingKey: `${type}:${created.insertId}:${index + 1}:in` })
           await connection.execute(
             `INSERT INTO stock_transfer_lines(stock_transfer_id,line_number,item_id,quantity,stock_quantity,unit_id,unit_cost,out_movement_id,in_movement_id) VALUES(?,?,?,?,?,?,?,?,?)`,
             [created.insertId, index + 1, line.item_id, line.quantity, stockQuantity, unit.unit_id, out.unitCost, out.movementId, incoming.movementId],
@@ -111,10 +112,9 @@ export class StockOperationService {
       const movementIds: number[] = []
       for (let index = 0; index < lines.length; index++) {
         const line = lines[index]!
-        if (line.actual_quantity === undefined || !line.gain_loss_account_id) throw new ValidationError(`Stok aktual dan akun selisih baris ${index + 1} wajib diisi`)
+        if (line.actual_quantity === undefined) throw new ValidationError(`Stok aktual baris ${index + 1} wajib diisi`)
         const item = await repo.item(connection, companyId, line.item_id)
         if (!item || item.item_type !== 'inventory') throw new ValidationError(`Barang baris ${index + 1} bukan persediaan aktif`)
-        if (!item.inventory_account_id || Number(item.inventory_account_id) === line.gain_loss_account_id) throw new ValidationError(`Akun persediaan dan akun selisih baris ${index + 1} harus berbeda`)
         const unit = await this.unit(connection, companyId, line.item_id, line.unit_id ?? Number(item.unit_id))
         const actualStock = multiplyDecimal(line.actual_quantity, 4, String(unit.factor_to_stock), 6, 4)
         const balance = await repo.lockBalance(connection, companyId, line.item_id, input.warehouse_id)
@@ -122,18 +122,22 @@ export class StockOperationService {
         const difference = subtractDecimal(actualStock, String(balance.quantity), 4)
         const sign = compareDecimal(difference, '0', 4)
         if (sign === 0) throw new ValidationError(`Stok aktual baris ${index + 1} sama dengan stok sistem`)
+        const mappings = new AccountMappingService()
+        const inventoryAccountId = await mappings.resolve(connection, companyId, 'INVENTORY', item.inventory_account_id ? Number(item.inventory_account_id) : null)
+        const gainLossAccountId = await mappings.resolve(connection, companyId, sign > 0 ? 'STOCK_GAIN' : 'STOCK_LOSS', line.gain_loss_account_id)
+        if (inventoryAccountId === gainLossAccountId) throw new ValidationError(`Akun persediaan dan akun selisih baris ${index + 1} harus berbeda`)
         const quantity = sign > 0 ? difference : subtractDecimal('0', difference, 4)
         const unitCost = compareDecimal(String(balance.average_cost), '0', 6) > 0 ? String(balance.average_cost) : line.unit_cost
         if (!unitCost) throw new ValidationError(`Biaya satuan baris ${index + 1} wajib untuk stok pertama`)
         const movement = await costing.applyMovement(connection, { companyId, itemId: line.item_id, warehouseId: input.warehouse_id, direction: sign > 0 ? 'in' : 'out', quantity, unitCost, transactionType: type, transactionId: created.insertId, transactionNumber: number, movementDate: input.date, postingKey: `${type}:${created.insertId}:${index + 1}`, userId: context.userId })
         movementIds.push(movement.movementId)
         if (compareDecimal(movement.totalCost, '0') > 0) {
-          journalLines.push({ accountId: Number(item.inventory_account_id), debit: sign > 0 ? movement.totalCost : '0', credit: sign > 0 ? '0' : movement.totalCost })
-          journalLines.push({ accountId: line.gain_loss_account_id, debit: sign > 0 ? '0' : movement.totalCost, credit: sign > 0 ? movement.totalCost : '0' })
+          journalLines.push({ accountId: inventoryAccountId, debit: sign > 0 ? movement.totalCost : '0', credit: sign > 0 ? '0' : movement.totalCost })
+          journalLines.push({ accountId: gainLossAccountId, debit: sign > 0 ? '0' : movement.totalCost, credit: sign > 0 ? movement.totalCost : '0' })
         }
         await connection.execute(
           `INSERT INTO stock_adjustment_lines(stock_adjustment_id,line_number,item_id,unit_id,system_quantity,actual_quantity,difference_quantity,unit_cost,value_difference,gain_loss_account_id,reason,inventory_movement_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [created.insertId, index + 1, line.item_id, unit.unit_id, balance.quantity, actualStock, difference, movement.unitCost, sign > 0 ? movement.totalCost : subtractDecimal('0', movement.totalCost), line.gain_loss_account_id, input.reason, movement.movementId],
+          [created.insertId, index + 1, line.item_id, unit.unit_id, balance.quantity, actualStock, difference, movement.unitCost, sign > 0 ? movement.totalCost : subtractDecimal('0', movement.totalCost), gainLossAccountId, input.reason, movement.movementId],
         )
       }
       const journalId = journalLines.length ? await new PostingService().createPostedJournal(connection, { companyId, sourceType: type, sourceId: created.insertId, date: input.date, description: input.reason, reference: number, context, lines: journalLines }) : null

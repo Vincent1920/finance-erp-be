@@ -19,6 +19,7 @@ export const createUserSchema = z.object({
 export const updateUserSchema = createUserSchema
   .omit({ password: true, role_ids: true, status: true })
   .partial()
+  .extend({ password: password.optional(), role_ids: z.array(z.coerce.number().int().positive()).max(50).optional(), status: z.enum(['active','inactive','locked']).optional() })
   .refine((value) => Object.keys(value).length > 0, 'Tidak ada perubahan')
 
 export const userStatusSchema = z.object({ status: z.enum(['active', 'inactive', 'locked']) })
@@ -41,8 +42,9 @@ export const createRoleSchema = z.object({
 })
 
 export const updateRoleSchema = createRoleSchema
-  .omit({ permission_ids: true })
+  .omit({ permission_ids: true, is_active: true })
   .partial()
+  .extend({ permission_ids: z.array(z.coerce.number().int().positive()).max(500).optional(), is_active: z.boolean().optional() })
   .refine((value) => Object.keys(value).length > 0, 'Tidak ada perubahan')
 
 export const assignPermissionsSchema = z.object({
@@ -86,10 +88,15 @@ export const companyProfileSchema = z.object({
 
 export const sequenceSchema = z.object({
   sequence_key: z.string().trim().min(1).max(100).regex(/^[a-z0-9_-]+$/),
-  prefix: z.string().trim().min(1).max(30).regex(/^[A-Za-z0-9{}\/_-]+$/),
+  prefix: z.string().trim().min(1).max(30)
+    .regex(/^[A-Za-z0-9{}\/_.-]+$/, 'Pola hanya boleh berisi huruf, angka, token tanggal, dan pemisah')
+    .refine((value) => value.includes('{MM}'), 'Pola nomor wajib memuat token bulan {MM}')
+    .refine(
+      (value) => (value.match(/\{[^}]+\}/g) ?? []).every((token) => ['{YYYY}', '{YY}', '{MM}', '{DD}'].includes(token)),
+      'Token yang didukung hanya {YYYY}, {YY}, {MM}, dan {DD}',
+    ),
   padding: z.coerce.number().int().min(1).max(12).default(6),
-  reset_period: z.enum(['never', 'yearly', 'monthly']).default('yearly'),
-  current_number: z.coerce.number().int().nonnegative().optional(),
+  reset_period: z.enum(['never', 'yearly', 'monthly']).default('monthly'),
 })
 
 export const resolveErrorSchema = z.object({

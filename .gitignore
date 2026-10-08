@@ -6,3 +6,9 @@ logs/
 .tmp/
 *.tsbuildinfo
 *.log
+
+# Runtime data and local verification artifacts
+storage/
+outputs/
+.env.*
+!.env.example

@@ -49,7 +49,8 @@ export class ImportController {
     ) {
       throw new ValidationError('File CSV atau XLSX wajib dipilih')
     }
-    const result = await this.service.preview(this.actor(c), type, file)
+    const mappingId = body.mapping_id ? importIdSchema.parse(body.mapping_id) : undefined
+    const result = await this.service.preview(this.actor(c), type, file, mappingId)
     return created(c, result, 'File berhasil divalidasi; belum ada data bisnis yang diimpor')
   }
 

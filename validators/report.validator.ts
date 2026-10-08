@@ -15,6 +15,29 @@ export const dateRangeQuerySchema = z
 
 export const asOfQuerySchema = z.object({ as_of_date: isoDate })
 
+export const reconciliationDetailQuerySchema = z.object({
+  as_of_date: isoDate,
+  reconciliation_type: z.enum(['ar', 'ap', 'inventory', 'bank', 'fixed_asset', 'accumulated_depreciation', 'payroll']),
+  account_id: z.coerce.number().int().positive(),
+})
+
+export const reconciliationCaseSchema = z.object({
+  as_of_date: isoDate,
+  reconciliation_type: z.enum(['ar', 'ap', 'inventory', 'bank', 'fixed_asset', 'accumulated_depreciation', 'payroll']),
+  account_id: z.coerce.number().int().positive(),
+  general_ledger: z.coerce.number().finite(),
+  subledger: z.coerce.number().finite(),
+  difference: z.coerce.number().finite(),
+  status: z.enum(['open', 'in_review', 'resolved', 'accepted_variance']),
+  assigned_to: z.coerce.number().int().positive().nullable().optional(),
+  due_date: isoDate.nullable().optional(),
+  note: z.string().trim().max(5000).nullable().optional(),
+}).superRefine((value, context) => {
+  if (['resolved', 'accepted_variance'].includes(value.status) && !value.note) {
+    context.addIssue({ code: 'custom', path: ['note'], message: 'Catatan penyelesaian wajib diisi' })
+  }
+})
+
 export const generalLedgerQuerySchema = dateRangeQuerySchema.and(
   z.object({
     account_id: optionalPositiveId,

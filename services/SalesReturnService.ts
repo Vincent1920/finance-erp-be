@@ -220,6 +220,7 @@ export class SalesReturnService {
               direction: 'in',
               quantity: String(l.stock_quantity ?? l.quantity),
               unitCost,
+              totalCostOverride: String(l.cogs_amount),
               transactionType: 'sales_return',
               transactionId: id,
               sourceLineId: Number(l.id),

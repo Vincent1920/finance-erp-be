@@ -2,7 +2,10 @@ import type { PoolConnection, RowDataPacket } from 'mysql2/promise'
 import { db, transaction } from '../config/database'
 import { AuditService } from './AuditService'
 import type { PostingContext } from './PostingService'
-import { ConflictError, NotFoundError } from '../utils/AppError'
+import { ConflictError, NotFoundError, ValidationError } from '../utils/AppError'
+import { addDecimal, subtractDecimal, compareDecimal } from '../utils/decimal'
+import type { z } from 'zod'
+import type { taxPaymentSchema } from '../validators/tax-reconciliation.validator'
 import type {
   TaxDocumentLinkInput,
   TaxReportImportInput,
@@ -62,6 +65,33 @@ function mappedRow(row: RowDataPacket, sourceKey?: string): SourceRow {
 }
 
 export class TaxReconciliationService {
+  async version(companyId: number, id: number) {
+    const [rows] = await db.execute<RowDataPacket[]>(
+      'SELECT * FROM tax_report_versions WHERE company_id=? AND id=?',
+      [companyId, id],
+    )
+    if (!rows[0]) throw new NotFoundError('Versi SPT tidak ditemukan')
+    return rows[0]
+  }
+  private completeness(row: SourceRow, period: string, requireTaxDocument = false) {
+    const issues: string[] = []
+    const identity = normalizeTaxNumber(row.counterparty_tax_number)
+    const documentNumber = requireTaxDocument ? row.match_document_number : row.document_number
+    if (!normalizeDocument(documentNumber)) issues.push('Nomor faktur/bukti potong belum diisi')
+    if (!row.document_date || row.document_date.slice(0, 7) !== period)
+      issues.push('Tanggal dokumen tidak sesuai masa pajak')
+    if (!identity) issues.push('NPWP/NIK belum diisi')
+    else if (identity.length !== 16) issues.push('NPWP/NIK harus 16 digit')
+    if (!row.counterparty_name.trim()) issues.push('Nama lawan transaksi belum diisi')
+    if (!row.tax_code.trim()) issues.push('Kode pajak belum diisi')
+    if (!Number.isFinite(row.dpp) || row.dpp === 0) issues.push('DPP harus terisi dan bukan nol')
+    if (!Number.isFinite(row.tax_amount)) issues.push('Nilai pajak tidak valid')
+    if (row.dpp && row.tax_amount && Math.sign(row.dpp) !== Math.sign(row.tax_amount))
+      issues.push('Arah DPP dan pajak tidak sama')
+    if (row.dpp && Math.abs(row.tax_amount / row.dpp) > 1)
+      issues.push('Tarif efektif melebihi 100%')
+    return { status: issues.length ? 'incomplete' : 'complete', issues }
+  }
   private async systemRows(companyId: number, period: string) {
     const start = `${period}-01`
     const end = new Date(Date.UTC(Number(period.slice(0, 4)), Number(period.slice(5, 7)), 1))
@@ -118,7 +148,7 @@ export class TaxReconciliationService {
       `SELECT CONCAT('SR-',h.id) source_key,'ppn_output' tax_type,h.return_number document_number,
         h.return_date document_date,c.tax_number counterparty_tax_number,c.name counterparty_name,
         GROUP_CONCAT(DISTINCT tc.code ORDER BY tc.code SEPARATOR ', ') tax_code,
-        -SUM(l.base_subtotal) dpp,-SUM(l.tax_amount) tax_amount,'Retur penjualan' description
+        -SUM(l.base_subtotal) dpp,-SUM(ROUND(l.tax_amount*h.exchange_rate,2)) tax_amount,'Retur penjualan' description
        FROM sales_returns h JOIN sales_return_lines l ON l.sales_return_id=h.id
        JOIN customers c ON c.id=h.customer_id JOIN tax_codes tc ON tc.id=l.tax_code_id AND tc.tax_type='vat'
        WHERE h.company_id=? AND h.return_date>=? AND h.return_date<? AND h.status='posted'
@@ -129,7 +159,7 @@ export class TaxReconciliationService {
       `SELECT CONCAT('PR-',h.id) source_key,'ppn_input' tax_type,h.return_number document_number,
         h.return_date document_date,s.tax_number counterparty_tax_number,s.name counterparty_name,
         GROUP_CONCAT(DISTINCT tc.code ORDER BY tc.code SEPARATOR ', ') tax_code,
-        -SUM(l.base_subtotal) dpp,-SUM(l.tax_amount) tax_amount,'Retur pembelian' description
+        -SUM(l.base_subtotal) dpp,-SUM(ROUND(l.tax_amount*h.exchange_rate,2)) tax_amount,'Retur pembelian' description
        FROM purchase_returns h JOIN purchase_return_lines l ON l.purchase_return_id=h.id
        JOIN suppliers s ON s.id=h.supplier_id JOIN tax_codes tc ON tc.id=l.tax_code_id AND tc.tax_type='vat'
        WHERE h.company_id=? AND h.return_date>=? AND h.return_date<? AND h.status='posted'
@@ -184,17 +214,23 @@ export class TaxReconciliationService {
         SUM(CASE WHEN a.account_type='revenue' THEN jl.credit-jl.debit ELSE 0 END) revenue,
         SUM(CASE WHEN a.account_type IN ('expense','cogs') THEN jl.debit-jl.credit ELSE 0 END) expense
        FROM journals j JOIN journal_lines jl ON jl.journal_id=j.id JOIN accounts a ON a.id=jl.account_id
-       WHERE j.company_id=? AND j.status='posted' AND j.journal_date>=? AND j.journal_date<?`,
+       WHERE j.company_id=? AND j.status IN ('posted','reversed') AND j.journal_date>=? AND j.journal_date<?`,
       [companyId, start, end],
     )
     const [taxAccounts] = await db.execute<RowDataPacket[]>(
-      `SELECT a.code,a.name,SUM(jl.debit-jl.credit) balance
-       FROM journals j JOIN journal_lines jl ON jl.journal_id=j.id JOIN accounts a ON a.id=jl.account_id
-       WHERE j.company_id=? AND j.status='posted' AND j.journal_date>=? AND j.journal_date<?
-         AND a.id IN (SELECT input_tax_account_id FROM tax_codes WHERE company_id=? AND input_tax_account_id IS NOT NULL
-                      UNION SELECT output_tax_account_id FROM tax_codes WHERE company_id=? AND output_tax_account_id IS NOT NULL)
+      `SELECT a.code,a.name,
+        COALESCE(SUM(CASE WHEN j.journal_date<? THEN jl.debit-jl.credit ELSE 0 END),0) opening_balance,
+        COALESCE(SUM(CASE WHEN j.journal_date>=? THEN jl.debit ELSE 0 END),0) period_debit,
+        COALESCE(SUM(CASE WHEN j.journal_date>=? THEN jl.credit ELSE 0 END),0) period_credit,
+        COALESCE(SUM(CASE WHEN j.id IS NOT NULL THEN jl.debit-jl.credit ELSE 0 END),0) closing_balance
+       FROM accounts a LEFT JOIN journal_lines jl ON jl.account_id=a.id
+       LEFT JOIN journals j ON j.id=jl.journal_id AND j.company_id=? AND j.status IN ('posted','reversed') AND j.journal_date<?
+       WHERE a.company_id=? AND a.id IN (
+         SELECT input_tax_account_id FROM tax_codes WHERE company_id=? UNION SELECT output_tax_account_id FROM tax_codes WHERE company_id=?
+         UNION SELECT pph21_payable_account_id FROM payroll_policies WHERE company_id=?
+         UNION SELECT account_id FROM account_mappings WHERE company_id=? AND mapping_key IN ('INPUT_VAT','OUTPUT_VAT','WITHHOLDING_TAX'))
        GROUP BY a.id,a.code,a.name ORDER BY a.code`,
-      [companyId, start, end, companyId, companyId],
+      [start, start, start, companyId, end, companyId, companyId, companyId, companyId, companyId],
     )
     return {
       revenue: number(rows[0]?.revenue),
@@ -202,7 +238,11 @@ export class TaxReconciliationService {
       taxAccounts: taxAccounts.map((row) => ({
         code: String(row.code),
         name: String(row.name),
-        balance: number(row.balance),
+        opening_balance: number(row.opening_balance),
+        period_debit: number(row.period_debit),
+        period_credit: number(row.period_credit),
+        closing_balance: number(row.closing_balance),
+        balance: number(row.period_debit) - number(row.period_credit),
       })),
     }
   }
@@ -236,6 +276,7 @@ export class TaxReconciliationService {
     const available = new Set(reported.map((_, index) => index))
     const comparisons: Record<string, unknown>[] = []
     for (const systemRow of system) {
+      const systemCompleteness = this.completeness(systemRow, period, true)
       const doc = normalizeDocument(systemRow.match_document_number)
       let matchMethod = ''
       let matchIndex = doc
@@ -260,6 +301,7 @@ export class TaxReconciliationService {
         if (matchIndex >= 0) matchMethod = 'identity_amount'
       }
       const reportRow = matchIndex >= 0 ? reported[matchIndex] : undefined
+      const reportCompleteness = reportRow ? this.completeness(reportRow, period) : null
       if (matchIndex >= 0) available.delete(matchIndex)
       const matchKey = reportRow
         ? `${systemRow.tax_type}|${doc || normalizeDocument(reportRow.document_number)}`
@@ -304,6 +346,15 @@ export class TaxReconciliationService {
         source_description: systemRow.description,
         resolution_code: resolution?.resolution_code ?? 'pending',
         resolution_note: resolution?.note ?? '',
+        completeness_status:
+          systemCompleteness.status === 'complete' &&
+          (!reportCompleteness || reportCompleteness.status === 'complete')
+            ? 'complete'
+            : 'incomplete',
+        validation_issues: [
+          ...systemCompleteness.issues.map((issue) => `Finora: ${issue}`),
+          ...(reportCompleteness?.issues ?? []).map((issue) => `SPT: ${issue}`),
+        ],
       })
     }
     for (const index of available) {
@@ -332,6 +383,10 @@ export class TaxReconciliationService {
         source_description: reportRow.description,
         resolution_code: resolution?.resolution_code ?? 'pending',
         resolution_note: resolution?.note ?? '',
+        completeness_status: this.completeness(reportRow, period).status,
+        validation_issues: this.completeness(reportRow, period).issues.map(
+          (issue) => `SPT: ${issue}`,
+        ),
       })
     }
     const types: TaxType[] = [
@@ -396,6 +451,42 @@ export class TaxReconciliationService {
       }),
     )
     const book = await this.bookTotals(companyId, period)
+    const [versions] = await db.execute<RowDataPacket[]>(
+      'SELECT id,revision,source_file,reason,created_at FROM tax_report_versions WHERE company_id=? AND period_id=? ORDER BY id DESC',
+      [companyId, periodRow?.id ?? 0],
+    )
+    const [payments] = await db.execute<RowDataPacket[]>(
+      `SELECT p.*,j.journal_number,j.status journal_status,a.code account_code,a.name account_name FROM tax_payment_evidence p JOIN journals j ON j.id=p.journal_id JOIN accounts a ON a.id=p.account_id WHERE p.company_id=? AND p.tax_period=? ORDER BY p.payment_date,p.id`,
+      [companyId, period],
+    )
+    const paymentSummary = Object.fromEntries(
+      ['ppn', 'pph21', 'unification']
+        .filter((group) => scope === 'all' || group === scope)
+        .map((group) => {
+          const paid = addDecimal(
+            payments
+              .filter((p) => p.tax_group === group && p.journal_status === 'posted')
+              .map((p) => String(p.amount)),
+          )
+          const output = totals.ppn_output as Record<string, number>,
+            input = totals.ppn_input as Record<string, number>
+          const target =
+            group === 'ppn'
+              ? subtractDecimal(output.reported_tax ?? 0, input.reported_tax ?? 0)
+              : String((groups[group] as Record<string, number>).reported_tax ?? 0)
+          return [
+            group,
+            {
+              reported_net_tax: target,
+              linked_payment: paid,
+              difference: subtractDecimal(target, paid),
+              invalid_evidence: payments.filter(
+                (p) => p.tax_group === group && p.journal_status !== 'posted',
+              ).length,
+            },
+          ]
+        }),
+    )
     const ppnOutput = totals.ppn_output as Record<string, number>
     const ppnInput = totals.ppn_input as Record<string, number>
     const pph21 = groups.pph21 as Record<string, number>
@@ -465,6 +556,7 @@ export class TaxReconciliationService {
     const readiness = comparisons.length
       ? Math.round(((matched + resolved) / comparisons.length) * 100)
       : 0
+    const incomplete = comparisons.filter((row) => row.completeness_status === 'incomplete').length
     return {
       period: periodRow
         ? {
@@ -485,12 +577,21 @@ export class TaxReconciliationService {
         matched,
         resolved,
         exceptions: comparisons.length - matched - resolved,
+        incomplete,
       },
       totals,
       groups,
       equalizations,
       tax_accounts: book.taxAccounts,
-      imported_rows: reported.map((row) => ({ ...row, tax_group: taxGroup(row.tax_type) })),
+      versions,
+      payments,
+      payment_summary: paymentSummary,
+      imported_rows: reported.map((row) => ({
+        ...row,
+        tax_group: taxGroup(row.tax_type),
+        completeness_status: this.completeness(row, period).status,
+        validation_issues: this.completeness(row, period).issues,
+      })),
       rows: comparisons,
     }
   }
@@ -499,10 +600,50 @@ export class TaxReconciliationService {
     return transaction(async (connection) => {
       const periodId = await this.ensurePeriod(connection, companyId, input.period, context.userId)
       const [periodRows] = await connection.execute<RowDataPacket[]>(
-        'SELECT status FROM tax_reconciliation_periods WHERE id=? AND company_id=? FOR UPDATE',
+        'SELECT * FROM tax_reconciliation_periods WHERE id=? AND company_id=? FOR UPDATE',
         [periodId, companyId],
       )
       if (periodRows[0]?.status === 'locked') throw new ConflictError('Masa pajak sudah dikunci')
+      if (input.revision !== Number(periodRows[0]!.revision))
+        throw new ConflictError(
+          'Gunakan nomor revisi aktif. Mulai pembetulan untuk menaikkan revisi SPT.',
+        )
+      const [previous] = await connection.execute<RowDataPacket[]>(
+        'SELECT * FROM tax_report_rows WHERE company_id=? AND period_id=?',
+        [companyId, periodId],
+      )
+      if (previous.length) {
+        if (input.notes.trim().length < 10)
+          throw new ValidationError('Impor pengganti wajib menyertakan alasan minimal 10 karakter')
+        await connection.execute(
+          `INSERT INTO tax_report_versions(company_id,period_id,revision,source_file,snapshot,reason,created_by) VALUES(?,?,?,?,?,?,?)`,
+          [
+            companyId,
+            periodId,
+            periodRows[0]!.revision,
+            periodRows[0]!.source_file,
+            JSON.stringify(previous),
+            input.notes,
+            context.userId,
+          ],
+        )
+      }
+      const documentKeys = new Set<string>()
+      for (const row of input.rows) {
+        const key = `${row.tax_type}|${normalizeDocument(row.document_number)}`
+        if (documentKeys.has(key))
+          throw new ValidationError(`Nomor dokumen SPT ganda: ${row.document_number}`)
+        documentKeys.add(key)
+        if (row.document_date.slice(0, 7) !== input.period)
+          throw new ValidationError(
+            `Tanggal dokumen ${row.document_number} tidak sesuai masa pajak`,
+          )
+      }
+      // Old explanations must not silently resolve a new replacement SPT.
+      await connection.execute(
+        'DELETE FROM tax_reconciliation_resolutions WHERE company_id=? AND period_id=?',
+        [companyId, periodId],
+      )
       await connection.execute('DELETE FROM tax_report_rows WHERE company_id=? AND period_id=?', [
         companyId,
         periodId,
@@ -555,7 +696,7 @@ export class TaxReconciliationService {
     return transaction(async (connection) => {
       const periodId = await this.ensurePeriod(connection, companyId, input.period, context.userId)
       const [periodRows] = await connection.execute<RowDataPacket[]>(
-        'SELECT status FROM tax_reconciliation_periods WHERE id=? AND company_id=? FOR UPDATE',
+        'SELECT status,imported_at FROM tax_reconciliation_periods WHERE id=? AND company_id=? FOR UPDATE',
         [periodId, companyId],
       )
       if (periodRows[0]?.status === 'locked') throw new ConflictError('Masa pajak sudah dikunci')
@@ -600,23 +741,51 @@ export class TaxReconciliationService {
   }
 
   async linkDocument(companyId: number, input: TaxDocumentLinkInput, context: PostingContext) {
-    await db.execute(
-      `INSERT INTO tax_document_links(company_id,source_key,tax_document_number,tax_document_date,notes,updated_by)
+    return transaction(async (connection) => {
+      const sourcePeriod = await this.sourcePeriod(connection, companyId, input.source_key)
+      const periodId = await this.ensurePeriod(connection, companyId, sourcePeriod, context.userId)
+      const [locked] = await connection.execute<RowDataPacket[]>(
+        'SELECT status FROM tax_reconciliation_periods WHERE id=? FOR UPDATE',
+        [periodId],
+      )
+      if (locked[0]?.status === 'locked')
+        throw new ConflictError(
+          'Masa pajak sudah dikunci; mulai pembetulan sebelum mengubah bukti/faktur',
+        )
+      const [old] = await connection.execute<RowDataPacket[]>(
+        'SELECT * FROM tax_document_links WHERE company_id=? AND source_key=? FOR UPDATE',
+        [companyId, input.source_key],
+      )
+      await connection.execute(
+        `INSERT INTO tax_document_links(company_id,source_key,tax_document_number,tax_document_date,notes,updated_by)
        VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE tax_document_number=VALUES(tax_document_number),
        tax_document_date=VALUES(tax_document_date),notes=VALUES(notes),updated_by=VALUES(updated_by),updated_at=NOW()`,
-      [
+        [
+          companyId,
+          input.source_key,
+          input.tax_document_number,
+          input.tax_document_date ?? null,
+          input.notes || null,
+          context.userId,
+        ],
+      )
+      await new AuditService().log(connection, {
         companyId,
-        input.source_key,
-        input.tax_document_number,
-        input.tax_document_date ?? null,
-        input.notes || null,
-        context.userId,
-      ],
-    )
-    return { sourceKey: input.source_key, taxDocumentNumber: input.tax_document_number }
+        userId: context.userId,
+        module: 'tax-reconciliation',
+        action: 'update',
+        recordType: 'tax_document_link',
+        recordId: periodId,
+        oldValue: old[0] ?? null,
+        newValue: input,
+      })
+      return { sourceKey: input.source_key, taxDocumentNumber: input.tax_document_number }
+    })
   }
 
   async resolve(companyId: number, input: TaxResolutionInput, context: PostingContext) {
+    if (input.resolution_code !== 'pending' && input.note.trim().length < 10)
+      throw new ValidationError('Penjelasan selisih wajib diisi minimal 10 karakter')
     return transaction(async (connection) => {
       const periodId = await this.ensurePeriod(connection, companyId, input.period, context.userId)
       const [periodRows] = await connection.execute<RowDataPacket[]>(
@@ -647,13 +816,24 @@ export class TaxReconciliationService {
     status: 'open' | 'reviewed' | 'locked',
     context: PostingContext,
   ) {
+    if (status === 'locked') {
+      const overview = await this.overview(companyId, period, 'all')
+      if (overview.summary.exceptions > 0)
+        throw new ValidationError('Selesaikan seluruh selisih sebelum mengunci masa pajak')
+      if (overview.summary.incomplete > 0)
+        throw new ValidationError(
+          'Lengkapi identitas, nomor dokumen, kode pajak, DPP, dan nilai pajak sebelum mengunci masa',
+        )
+    }
     return transaction(async (connection) => {
       const periodId = await this.ensurePeriod(connection, companyId, period, context.userId)
       const [rows] = await connection.execute<RowDataPacket[]>(
-        'SELECT status FROM tax_reconciliation_periods WHERE id=? AND company_id=? FOR UPDATE',
+        'SELECT status,imported_at FROM tax_reconciliation_periods WHERE id=? AND company_id=? FOR UPDATE',
         [periodId, companyId],
       )
       if (!rows[0]) throw new NotFoundError('Masa rekonsiliasi tidak ditemukan')
+      if (status === 'locked' && !rows[0].imported_at)
+        throw new ConflictError('Impor SPT untuk versi aktif sebelum mengunci masa pajak')
       if (rows[0].status === 'locked' && status !== 'locked')
         throw new ConflictError('Masa pajak yang sudah dikunci tidak dapat dibuka dari layar ini')
       await connection.execute(
@@ -692,5 +872,182 @@ export class TaxReconciliationService {
       [companyId, period],
     )
     return Number(rows[0]!.id)
+  }
+
+  private async sourcePeriod(connection: PoolConnection, companyId: number, key: string) {
+    const match = /^(SI|PI|SR|PR|INTERNAL)-(\d+)$/.exec(key) ?? /^PPh-(PI)-(\d+)-\d+$/.exec(key)
+    if (!match) throw new ValidationError('Sumber dokumen pajak tidak dikenali')
+    const type = match[1]!,
+      id = Number(match[2]),
+      tables: Record<string, [string, string]> = {
+        SI: ['sales_invoices', 'invoice_date'],
+        PI: ['purchase_invoices', 'invoice_date'],
+        SR: ['sales_returns', 'return_date'],
+        PR: ['purchase_returns', 'return_date'],
+      }
+    const [rows] =
+      type === 'INTERNAL'
+        ? await connection.execute<RowDataPacket[]>(
+            'SELECT p.tax_period period FROM tax_internal_rows r JOIN tax_reconciliation_periods p ON p.id=r.period_id WHERE r.id=? AND r.company_id=?',
+            [id, companyId],
+          )
+        : await connection.execute<RowDataPacket[]>(
+            `SELECT ${tables[type]![1]} period FROM ${tables[type]![0]} WHERE id=? AND company_id=?`,
+            [id, companyId],
+          )
+    if (!rows[0])
+      throw new NotFoundError('Sumber dokumen pajak tidak ditemukan dalam perusahaan ini')
+    return dateOnly(rows[0].period).slice(0, 7)
+  }
+  async amend(companyId: number, period: string, reason: string, context: PostingContext) {
+    return transaction(async (c) => {
+      const id = await this.ensurePeriod(c, companyId, period, context.userId)
+      const [rows] = await c.execute<RowDataPacket[]>(
+        'SELECT * FROM tax_reconciliation_periods WHERE id=? FOR UPDATE',
+        [id],
+      )
+      if (!rows[0]?.imported_at) throw new ConflictError('Belum ada SPT untuk dibetulkan')
+      if (rows[0].status !== 'locked')
+        throw new ConflictError(
+          'Pembetulan dimulai dari masa yang sudah dikunci; masa terbuka dapat diperbaiki melalui impor pengganti',
+        )
+      const [snapshot] = await c.execute<RowDataPacket[]>(
+        'SELECT * FROM tax_report_rows WHERE company_id=? AND period_id=?',
+        [companyId, id],
+      )
+      await c.execute(
+        'INSERT INTO tax_report_versions(company_id,period_id,revision,source_file,snapshot,reason,created_by) VALUES(?,?,?,?,?,?,?)',
+        [
+          companyId,
+          id,
+          rows[0].revision,
+          rows[0].source_file,
+          JSON.stringify(snapshot),
+          reason,
+          context.userId,
+        ],
+      )
+      await c.execute(
+        "UPDATE tax_reconciliation_periods SET status='open',revision=revision+1,imported_at=NULL,source_file=NULL,reviewed_by=NULL,reviewed_at=NULL,locked_by=NULL,locked_at=NULL WHERE id=?",
+        [id],
+      )
+      await c.execute('DELETE FROM tax_report_rows WHERE company_id=? AND period_id=?', [
+        companyId,
+        id,
+      ])
+      await c.execute(
+        'DELETE FROM tax_reconciliation_resolutions WHERE company_id=? AND period_id=?',
+        [companyId, id],
+      )
+      await new AuditService().log(c, {
+        companyId,
+        userId: context.userId,
+        module: 'tax-reconciliation',
+        action: 'update',
+        recordType: 'tax_reconciliation_period',
+        recordId: id,
+        oldValue: rows[0],
+        newValue: { reason, revision: Number(rows[0].revision) + 1, status: 'open' },
+      })
+      return { periodId: id, revision: Number(rows[0].revision) + 1 }
+    })
+  }
+  async payment(
+    companyId: number,
+    input: z.infer<typeof taxPaymentSchema>,
+    context: PostingContext,
+  ) {
+    return transaction(async (c) => {
+      const [journals] = await c.execute<RowDataPacket[]>(
+        'SELECT id,status,journal_date FROM journals WHERE id=? AND company_id=? FOR UPDATE',
+        [input.journal_id, companyId],
+      )
+      if (journals[0]?.status !== 'posted' || dateOnly(journals[0].journal_date) !== input.date)
+        throw new ValidationError(
+          'Bukti pembayaran harus terkait jurnal posted dengan tanggal pembayaran yang sama',
+        )
+      const [accounts] = await c.execute<RowDataPacket[]>(
+        `SELECT a.id FROM accounts a WHERE a.company_id=? AND a.id=? AND a.account_type='liability' AND (a.id IN(SELECT output_tax_account_id FROM tax_codes WHERE company_id=? UNION SELECT pph21_payable_account_id FROM payroll_policies WHERE company_id=? UNION SELECT account_id FROM account_mappings WHERE company_id=? AND mapping_key IN('OUTPUT_VAT','WITHHOLDING_TAX')))`,
+        [companyId, input.account_id, companyId, companyId, companyId],
+      )
+      if (!accounts[0])
+        throw new ValidationError(
+          'Pilih akun utang pajak yang dipetakan di kode pajak, payroll atau default mapping',
+        )
+      const [groupAccounts] = await c.execute<RowDataPacket[]>(
+        `SELECT id FROM accounts WHERE id=? AND id IN (
+        SELECT output_tax_account_id FROM tax_codes WHERE company_id=? AND (?='ppn' AND tax_type='vat' OR ?='pph21' AND reporting_type IN('pph21_employee','pph21_non_employee') OR ?='unification' AND tax_type='withholding' AND COALESCE(reporting_type,'pph23') NOT IN('pph21_employee','pph21_non_employee'))
+        UNION SELECT pph21_payable_account_id FROM payroll_policies WHERE company_id=? AND ?='pph21'
+        UNION SELECT account_id FROM account_mappings WHERE company_id=? AND (mapping_key='OUTPUT_VAT' AND ?='ppn' OR mapping_key='WITHHOLDING_TAX' AND ?='unification'))`,
+        [
+          input.account_id,
+          companyId,
+          input.tax_group,
+          input.tax_group,
+          input.tax_group,
+          companyId,
+          input.tax_group,
+          companyId,
+          input.tax_group,
+          input.tax_group,
+        ],
+      )
+      if (!groupAccounts.length)
+        throw new ValidationError('Akun utang pajak tidak sesuai kelompok setoran yang dipilih')
+      const [cash] = await c.execute<RowDataPacket[]>(
+        `SELECT COALESCE(SUM(l.credit-l.debit),0) amount FROM journal_lines l WHERE l.journal_id=? AND l.account_id IN(SELECT gl_account_id FROM bank_accounts WHERE company_id=? AND deleted_at IS NULL UNION SELECT account_id FROM account_mappings WHERE company_id=? AND mapping_key IN('CASH','BANK'))`,
+        [input.journal_id, companyId, companyId],
+      )
+      const [cashUsed] = await c.execute<RowDataPacket[]>(
+        'SELECT COALESCE(SUM(amount),0) amount FROM tax_payment_evidence WHERE company_id=? AND journal_id=?',
+        [companyId, input.journal_id],
+      )
+      if (
+        compareDecimal(addDecimal([String(cashUsed[0]!.amount), input.amount]), cash[0]!.amount) > 0
+      )
+        throw new ValidationError(
+          'Bukti setoran harus didukung kredit kas/bank yang cukup pada jurnal pembayaran',
+        )
+      const [net] = await c.execute<RowDataPacket[]>(
+        'SELECT COALESCE(SUM(debit-credit),0) amount FROM journal_lines WHERE journal_id=? AND account_id=?',
+        [input.journal_id, input.account_id],
+      )
+      const [used] = await c.execute<RowDataPacket[]>(
+        'SELECT COALESCE(SUM(amount),0) amount FROM tax_payment_evidence WHERE company_id=? AND journal_id=? AND account_id=?',
+        [companyId, input.journal_id, input.account_id],
+      )
+      if (compareDecimal(addDecimal([String(used[0]!.amount), input.amount]), net[0]!.amount) > 0)
+        throw new ConflictError('Alokasi bukti melebihi debit bersih pelunasan pajak pada jurnal')
+      const [duplicate] = await c.execute<RowDataPacket[]>(
+        'SELECT id FROM tax_payment_evidence WHERE company_id=? AND ntpn=? AND tax_group=? AND account_id=?',
+        [companyId, input.ntpn, input.tax_group, input.account_id],
+      )
+      if (duplicate[0]) throw new ConflictError('Bukti pembayaran yang sama sudah dicatat')
+      await c.execute(
+        'INSERT INTO tax_payment_evidence(company_id,tax_period,tax_group,payment_date,ntpn,journal_id,account_id,amount,notes,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        [
+          companyId,
+          input.period,
+          input.tax_group,
+          input.date,
+          input.ntpn,
+          input.journal_id,
+          input.account_id,
+          input.amount,
+          input.notes,
+          context.userId,
+        ],
+      )
+      await new AuditService().log(c, {
+        companyId,
+        userId: context.userId,
+        module: 'tax-reconciliation',
+        action: 'create',
+        recordType: 'tax_payment_evidence',
+        recordId: input.journal_id,
+        newValue: input,
+      })
+      return { saved: true }
+    })
   }
 }

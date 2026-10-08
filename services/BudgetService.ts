@@ -136,7 +136,10 @@ export class BudgetService {
   }
   async detail(companyId: number, id: number, asOf: string) {
     const [headers] = await db.execute<RowDataPacket[]>(
-        'SELECT * FROM budgets WHERE id=? AND company_id=?',
+        `SELECT b.*,u.name creator_name,v.name approver_name FROM budgets b
+         LEFT JOIN users u ON u.id=b.created_by AND u.company_id=b.company_id
+         LEFT JOIN users v ON v.id=b.approved_by AND v.company_id=b.company_id
+         WHERE b.id=? AND b.company_id=?`,
         [id, companyId],
       ),
       header = headers[0]
@@ -149,6 +152,12 @@ export class BudgetService {
       `SELECT a.code,a.name,SUM(CASE WHEN a.normal_balance='credit' THEN jl.credit-jl.debit ELSE jl.debit-jl.credit END) actual FROM journal_lines jl JOIN journals j ON j.id=jl.journal_id JOIN accounts a ON a.id=jl.account_id WHERE j.company_id=? AND j.status IN ('posted','reversed') AND YEAR(j.journal_date)=? AND j.journal_date<=? AND a.account_type IN('expense','cogs','revenue','other_income','other_expense') AND NOT EXISTS(SELECT 1 FROM budget_lines bl WHERE bl.budget_id=? AND bl.account_id=jl.account_id AND bl.month=MONTH(j.journal_date) AND bl.cost_center_id <=> jl.cost_center_id AND bl.project_id <=> jl.project_id) GROUP BY a.id,a.code,a.name`,
       [companyId, header.fiscal_year, asOf, id],
     )
-    return { header, rows, unbudgeted }
+    const [history] = await db.execute<RowDataPacket[]>(
+      `SELECT l.id,l.action,l.user_id,l.created_at,u.name user_name FROM audit_logs l
+       LEFT JOIN users u ON u.id=l.user_id AND u.company_id=l.company_id
+       WHERE l.company_id=? AND l.record_type='budget' AND l.record_id=? ORDER BY l.created_at,l.id`,
+      [companyId, id],
+    )
+    return { header, rows, unbudgeted, history }
   }
 }

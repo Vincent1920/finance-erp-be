@@ -1,4 +1,5 @@
 import type { RowDataPacket } from 'mysql2/promise'
+import { prepareDirectPosting } from './WorkflowPolicyService'
 import { InvoiceRepository, type SalesInvoiceWrite } from '../repositories/InvoiceRepository'
 import type { QueryExecutor } from '../types/database'
 import { transaction } from '../config/database'
@@ -22,6 +23,7 @@ import {
 } from './InvoiceDomainSupport'
 import { NumberSequenceService } from './NumberSequenceService'
 import { PostingService, type JournalLineInput } from './PostingService'
+import { AccountMappingService } from './AccountMappingService'
 
 export type {
   CreatedImportedInvoice,
@@ -37,6 +39,7 @@ export class SalesInvoiceService {
     private sequences = new NumberSequenceService(),
     private posting = new PostingService(),
     private inventory = new InventoryCostingService(),
+    private mappings = new AccountMappingService(),
   ) {}
 
   list(companyId: number, query: Parameters<InvoiceRepository['listSales']>[1]) {
@@ -168,14 +171,13 @@ export class SalesInvoiceService {
     return transaction(async (connection) => {
       const invoice = await this.repository.findSales(connection, id, companyId, true)
       if (!invoice) throw new NotFoundError('Sales invoice tidak ditemukan')
-      if (invoice.status !== 'approved')
+      if (invoice.status !== 'approved' && !(await prepareDirectPosting(connection,companyId,'sales_invoices',id,String(invoice.status),context.userId)))
         throw new ConflictError('Hanya sales invoice Approved yang dapat diposting')
-      if (!invoice.receivable_account_id)
-        throw new ValidationError('Akun piutang pelanggan belum dikonfigurasi')
+      const receivableAccountId = await this.mappings.resolve(connection, companyId, 'AR_CONTROL', invoice.receivable_account_id ? Number(invoice.receivable_account_id) : null)
       const lines = await this.repository.salesLines(connection, id)
       const journals: JournalLineInput[] = [
         {
-          accountId: Number(invoice.receivable_account_id),
+          accountId: receivableAccountId,
           description: String(invoice.invoice_number),
           debit: String(invoice.base_grand_total),
           credit: '0',
@@ -185,26 +187,27 @@ export class SalesInvoiceService {
       const debits = new Map<number, string>()
       const movementIds: number[] = []
       for (const line of lines) {
+        const revenueAccountId = await this.mappings.resolve(connection, companyId, 'REVENUE', line.revenue_account_id ? Number(line.revenue_account_id) : null)
         this.addAccount(
           credits,
-          Number(line.revenue_account_id),
+          revenueAccountId,
           String(line.base_subtotal),
           'Akun pendapatan belum dikonfigurasi',
         )
-        if (compareDecimal(String(line.base_tax_amount), '0') > 0)
+        if (compareDecimal(String(line.base_tax_amount), '0') > 0) {
+          const outputTaxAccountId = await this.mappings.resolve(connection, companyId, 'OUTPUT_VAT', line.output_tax_account_id ? Number(line.output_tax_account_id) : null)
           this.addAccount(
             credits,
-            Number(line.output_tax_account_id),
+            outputTaxAccountId,
             String(line.base_tax_amount),
             'Akun pajak keluaran belum dikonfigurasi',
           )
+        }
         if (line.item_type === 'inventory') {
           if (!invoice.warehouse_id)
             throw new ValidationError('Gudang wajib diisi untuk invoice barang inventory')
-          if (!line.inventory_account_id || !line.cogs_account_id)
-            throw new ValidationError(
-              `Akun persediaan/COGS item ${line.item_code} belum dikonfigurasi`,
-            )
+          const inventoryAccountId = await this.mappings.resolve(connection, companyId, 'INVENTORY', line.inventory_account_id ? Number(line.inventory_account_id) : null)
+          const cogsAccountId = await this.mappings.resolve(connection, companyId, 'COGS', line.cogs_account_id ? Number(line.cogs_account_id) : null)
           const movement = await this.inventory.applyMovement(connection, {
             companyId,
             itemId: Number(line.item_id),
@@ -223,13 +226,13 @@ export class SalesInvoiceService {
           movementIds.push(movement.movementId)
           this.addAccount(
             debits,
-            Number(line.cogs_account_id),
+            cogsAccountId,
             movement.totalCost,
             'Akun COGS belum dikonfigurasi',
           )
           this.addAccount(
             credits,
-            Number(line.inventory_account_id),
+            inventoryAccountId,
             movement.totalCost,
             'Akun persediaan belum dikonfigurasi',
           )
@@ -276,8 +279,8 @@ export class SalesInvoiceService {
           id,
           companyId,
           ['approved'],
-          "status='posted', journal_id=?, posted_by=?, posted_at=NOW()",
-          [journalId, context.userId],
+          "status='posted', journal_id=?, control_account_id=?, posted_by=?, posted_at=NOW()",
+          [journalId, receivableAccountId, context.userId],
         ))
       )
         throw new ConflictError('Status sales invoice telah berubah')
@@ -520,6 +523,21 @@ export class SalesInvoiceService {
       if (!invoice) throw new NotFoundError('Sales invoice tidak ditemukan')
       if (!from.includes(String(invoice.status)))
         throw new ConflictError(`Sales invoice ${invoice.status} tidak dapat diproses`)
+      if (action === 'submit')
+        await this.validation.ensureCustomerCreditLimit(
+          connection,
+          companyId,
+          Number(invoice.customer_id),
+          id,
+          Number(invoice.base_grand_total),
+        )
+      if (action === 'approve')
+        await this.validation.ensureIndependentApprover(
+          connection,
+          companyId,
+          invoice.submitted_by ? Number(invoice.submitted_by) : null,
+          context.userId,
+        )
       if (!(await this.repository.transitionSales(connection, id, companyId, from, fields, values)))
         throw new ConflictError('Status sales invoice telah berubah')
       const status =

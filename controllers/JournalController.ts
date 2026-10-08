@@ -6,7 +6,8 @@ import { created, ok, paginated } from '../utils/response'
 import {
   journalIdSchema,
   journalListQuerySchema,
-  journalSchema,
+  journalCreateSchema,
+  journalUpdateSchema,
   rejectionSchema,
   reversalSchema,
 } from '../validators/journal.validator'
@@ -20,11 +21,10 @@ export class JournalController {
     return paginated(c, result.rows, result)
   }
 
-  get = async (c: Context) =>
-    ok(c, await this.service.get(this.id(c), c.get('user').companyId))
+  get = async (c: Context) => ok(c, await this.service.get(this.id(c), c.get('user').companyId))
 
   create = async (c: Context) => {
-    const input = journalSchema.parse(await c.req.json())
+    const input = journalCreateSchema.parse(await c.req.json())
     return created(
       c,
       await this.service.create(c.get('user').companyId, input, this.context(c)),
@@ -33,7 +33,7 @@ export class JournalController {
   }
 
   update = async (c: Context) => {
-    const input = journalSchema.parse(await c.req.json())
+    const input = journalUpdateSchema.parse(await c.req.json())
     return ok(
       c,
       await this.service.update(this.id(c), c.get('user').companyId, input, this.context(c)),

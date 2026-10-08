@@ -13,8 +13,8 @@ export const entityDefinitions = {
   },
   accounts: {
     search: "CONCAT(code, ' ', name)",
-    sort: ['code', 'name', 'account_type', 'is_active', 'id'],
-    defaultSort: 'code',
+    sort: ['presentation_order', 'code', 'name', 'account_type', 'is_active', 'id'],
+    defaultSort: 'presentation_order',
     activeColumn: 'is_active',
     deleted: true,
   },
@@ -60,6 +60,7 @@ export const entityDefinitions = {
     activeColumn: 'is_active',
     deleted: false,
   },
+  departments: {search: "CONCAT(code, ' ', name)",sort:['code','name','is_active','id'],defaultSort:'name',activeColumn:'is_active',deleted:false},
   cost_centers: {
     search: "CONCAT(code, ' ', name)",
     sort: ['code', 'name', 'is_active', 'id'],
@@ -144,6 +145,7 @@ const dependencies: Partial<Record<EntityTable, Array<[string, string]>>> = {
     ['inventory_balances', 'item_id'],
     ['inventory_movements', 'item_id'],
   ],
+  departments: [['payroll_employees','department_id']],
   warehouses: [
     ['inventory_balances', 'warehouse_id'],
     ['inventory_movements', 'warehouse_id'],
@@ -216,14 +218,22 @@ export class EntityRepository {
     const sort = (this.definition.sort as readonly string[]).includes(requestedSort)
       ? requestedSort
       : this.definition.defaultSort
-    const order = query.order?.toLowerCase() === 'asc' ? 'ASC' : 'DESC'
+    const order = query.order?.toLowerCase() === 'asc' || (!query.order&&this.table==='accounts') ? 'ASC' : 'DESC'
+    const orderSql=this.table==='accounts'&&sort==='presentation_order'?`FIELD(account_type,'asset','liability','equity','revenue','cogs','expense','other_income','other_expense'),COALESCE(presentation_order,990000) ${order},code ${order},id ${order}`:`${sort} ${order},id DESC`
     const where = conditions.join(' AND ')
 
+    const accountDetails = this.table === 'accounts'
+      ? `,
+         (SELECT parent.code FROM accounts parent WHERE parent.id = accounts.parent_id) AS parent_code,
+         (SELECT parent.name FROM accounts parent WHERE parent.id = accounts.parent_id) AS parent_name,
+         (SELECT COUNT(*) FROM accounts child
+           WHERE child.parent_id = accounts.id AND child.deleted_at IS NULL) AS child_count`
+      : ''
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT *
+      `SELECT *${accountDetails}
        FROM ${this.table}
        WHERE ${where}
-       ORDER BY ${sort} ${order}, id DESC
+       ORDER BY ${orderSql}
        LIMIT ${limit} OFFSET ${offset}`,
       values,
     )
@@ -367,5 +377,66 @@ export class EntityRepository {
       [id, companyId, companyId, parentId],
     )
     return Boolean(rows[0])
+  }
+
+  async accountHasChildren(
+    id: number,
+    companyId: number,
+    connection: QueryExecutor = db,
+  ) {
+    const [rows] = await connection.execute<RowDataPacket[]>(
+      `SELECT 1 FROM accounts
+       WHERE parent_id = ? AND company_id = ? AND deleted_at IS NULL
+       LIMIT 1`,
+      [id, companyId],
+    )
+    return Boolean(rows[0])
+  }
+
+  async accountHasJournalEntries(
+    id: number,
+    companyId: number,
+    connection: QueryExecutor = db,
+  ) {
+    const [rows] = await connection.execute<RowDataPacket[]>(
+      `SELECT 1
+       FROM journal_lines line
+       INNER JOIN journals journal ON journal.id = line.journal_id
+       WHERE line.account_id = ? AND journal.company_id = ?
+       LIMIT 1`,
+      [id, companyId],
+    )
+    return Boolean(rows[0])
+  }
+
+  async syncAccountDescendantLevels(
+    id: number,
+    companyId: number,
+    connection: QueryExecutor = db,
+  ) {
+    const account = await this.find(id, companyId, connection)
+    if (!account) return
+    const [rows] = await connection.execute<RowDataPacket[]>(
+      `WITH RECURSIVE descendants AS (
+         SELECT id, parent_id, 1 AS depth
+         FROM accounts
+         WHERE parent_id = ? AND company_id = ? AND deleted_at IS NULL
+         UNION ALL
+         SELECT child.id, child.parent_id, parent.depth + 1
+         FROM accounts child
+         INNER JOIN descendants parent ON child.parent_id = parent.id
+         WHERE child.company_id = ? AND child.deleted_at IS NULL
+       )
+       SELECT id, depth FROM descendants ORDER BY depth, id`,
+      [id, companyId, companyId],
+    )
+    for (const row of rows) {
+      const level = Number(account.level) + Number(row.depth)
+      if (level > 10) throw new Error('Hierarki akun melebihi maksimum 10 level')
+      await connection.execute(
+        'UPDATE accounts SET level = ? WHERE id = ? AND company_id = ?',
+        [level, Number(row.id), companyId],
+      )
+    }
   }
 }

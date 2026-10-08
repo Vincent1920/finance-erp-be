@@ -320,13 +320,17 @@ export class ImportRepository {
       values.push(query.status)
     }
     const where = conditions.join(' AND ')
-    const offset = (query.page - 1) * query.limit
+    const page = Number.isSafeInteger(query.page) && query.page > 0 ? query.page : 1
+    const limit = Number.isSafeInteger(query.limit) && query.limit > 0
+      ? Math.min(query.limit, 200)
+      : 50
+    const offset = (page - 1) * limit
     const [rows] = await connection.execute<ImportPreviewDbRow[]>(
       `SELECT * FROM import_job_rows
        WHERE ${where}
        ORDER BY source_row_number
-       LIMIT ? OFFSET ?`,
-      [...values, query.limit, offset],
+       LIMIT ${limit} OFFSET ${offset}`,
+      values,
     )
     const [counts] = await connection.execute<(RowDataPacket & { total: number })[]>(
       `SELECT COUNT(*) AS total FROM import_job_rows WHERE ${where}`,
@@ -335,8 +339,8 @@ export class ImportRepository {
     return {
       rows: rows.map(mapPreviewRow),
       total: Number(counts[0]?.total ?? 0),
-      page: query.page,
-      limit: query.limit,
+      page,
+      limit,
     }
   }
 

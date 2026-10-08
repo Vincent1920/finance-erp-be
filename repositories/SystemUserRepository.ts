@@ -1,3 +1,4 @@
+import {assertUserQuota} from '../services/TenantAccessService'
 import type { ResultSetHeader, RowDataPacket } from 'mysql2'
 import { db } from '../config/database'
 import type { DatabaseValue, QueryExecutor } from '../types/database'
@@ -8,6 +9,17 @@ interface IdRow extends RowDataPacket {
 }
 
 export class SystemUserRepository {
+  async hasAccess(roleIds: number[], companyId: number, connection: QueryExecutor) {
+    if (!roleIds.length) return false
+    const [rows] = await connection.execute<RowDataPacket[]>(
+      `SELECT r.id FROM roles r WHERE r.id IN (${roleIds.map(() => '?').join(',')})
+       AND r.is_active=TRUE AND (r.company_id IS NULL OR r.company_id=?)
+       AND (r.slug='super-admin' OR EXISTS(SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id)) LIMIT 1`,
+      [...roleIds, companyId],
+    )
+    return rows.length > 0
+  }
+
   async list(
     companyId: number,
     query: { page?: string; limit?: string; search?: string; status?: string },
@@ -72,7 +84,7 @@ export class SystemUserRepository {
        ORDER BY r.name`,
       [id],
     )
-    return { ...rows[0], roles }
+    return { ...rows[0], id: Number(rows[0].id), status: String(rows[0].status), roles }
   }
 
   async create(
@@ -114,6 +126,7 @@ export class SystemUserRepository {
     actorId: number,
     connection: QueryExecutor,
   ) {
+    if(status==='active'){const [old]=await connection.execute<any[]>('SELECT status FROM users WHERE id=? AND company_id=?',[id,companyId]);if(old[0]&&old[0].status!=='active')await assertUserQuota(connection,companyId)}
     await connection.execute(
       `UPDATE users
        SET status = ?,
@@ -124,6 +137,7 @@ export class SystemUserRepository {
        WHERE id = ? AND company_id = ? AND deleted_at IS NULL`,
       [status, status, status, actorId, status, actorId, id, companyId],
     )
+    if(status!=='active')await connection.execute("UPDATE auth_sessions SET revoked_at=UTC_TIMESTAMP(3) WHERE company_id=? AND user_id=? AND revoked_at IS NULL",[companyId,id])
   }
 
   async resetPassword(
@@ -142,6 +156,7 @@ export class SystemUserRepository {
        WHERE id = ? AND company_id = ? AND deleted_at IS NULL`,
       [passwordHash, actorId, id, companyId],
     )
+    await connection.execute("UPDATE auth_sessions SET revoked_at=UTC_TIMESTAMP(3) WHERE company_id=? AND user_id=? AND revoked_at IS NULL",[companyId,id])
   }
 
   async validateRoles(

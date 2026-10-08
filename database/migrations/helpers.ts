@@ -146,6 +146,47 @@ export async function dropForeignKeyIfExists(
   }
 }
 
+export async function addCheckIfMissing(
+  db: MigrationDatabase,
+  table: string,
+  constraint: string,
+  expression: string,
+) {
+  const exists = await hasObject(
+    db,
+    `SELECT COUNT(*) AS object_count
+       FROM information_schema.TABLE_CONSTRAINTS
+      WHERE CONSTRAINT_SCHEMA = DATABASE()
+        AND TABLE_NAME = ${literal(table)}
+        AND CONSTRAINT_NAME = ${literal(constraint)}
+        AND CONSTRAINT_TYPE = 'CHECK'`,
+  )
+  if (!exists)
+    await db.query(
+      `ALTER TABLE ${identifier(table)} ADD CONSTRAINT ${identifier(constraint)} CHECK (${expression})`,
+    )
+}
+
+export async function dropCheckIfExists(
+  db: MigrationDatabase,
+  table: string,
+  constraint: string,
+) {
+  const exists = await hasObject(
+    db,
+    `SELECT COUNT(*) AS object_count
+       FROM information_schema.TABLE_CONSTRAINTS
+      WHERE CONSTRAINT_SCHEMA = DATABASE()
+        AND TABLE_NAME = ${literal(table)}
+        AND CONSTRAINT_NAME = ${literal(constraint)}
+        AND CONSTRAINT_TYPE = 'CHECK'`,
+  )
+  if (exists)
+    await db.query(
+      `ALTER TABLE ${identifier(table)} DROP CHECK ${identifier(constraint)}`,
+    )
+}
+
 export async function dropTables(db: MigrationDatabase, tables: readonly string[]) {
   for (const table of tables) {
     await db.query(`DROP TABLE IF EXISTS ${identifier(table)}`)

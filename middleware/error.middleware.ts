@@ -7,6 +7,7 @@ import { AppError } from '../utils/AppError'
 interface DatabaseError extends Error {
   code?: string
   errno?: number
+  sqlMessage?: string
 }
 
 const errorLogs = new ErrorLogService()
@@ -59,8 +60,19 @@ export const errorHandler: ErrorHandler = async (error, c) => {
 
   const databaseError = error as DatabaseError
   if (databaseError.code === 'ER_DUP_ENTRY') {
+    const duplicateMessage = databaseError.sqlMessage ?? databaseError.message ?? ''
+    const documentDuplicate =
+      /(?:journal|invoice|order|receipt|payment|return|transfer|adjustment|number)/i.test(
+        duplicateMessage,
+      )
     return c.json(
-      { success: false, message: 'Kode atau data unik sudah digunakan', requestId },
+      {
+        success: false,
+        message: documentDuplicate
+          ? 'Nomor dokumen sudah digunakan. Muat ulang halaman untuk memperoleh nomor berikutnya.'
+          : 'Kode atau data unik sudah digunakan. Periksa kembali data yang dimasukkan.',
+        requestId,
+      },
       409,
     )
   }

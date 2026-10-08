@@ -31,7 +31,7 @@ export class SalesReturnRepository {
   }
   async find(connection: QueryExecutor, id: number, companyId: number, lock = false) {
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT sr.*,c.code customer_code,c.name customer_name,c.receivable_account_id,si.invoice_number FROM sales_returns sr INNER JOIN customers c ON c.id=sr.customer_id INNER JOIN sales_invoices si ON si.id=sr.sales_invoice_id WHERE sr.id=? AND sr.company_id=? LIMIT 1 ${lock ? 'FOR UPDATE' : ''}`,
+      `SELECT sr.*,c.code customer_code,c.name customer_name,si.control_account_id AS receivable_account_id,si.invoice_number FROM sales_returns sr INNER JOIN customers c ON c.id=sr.customer_id INNER JOIN sales_invoices si ON si.id=sr.sales_invoice_id WHERE sr.id=? AND sr.company_id=? LIMIT 1 ${lock ? 'FOR UPDATE' : ''}`,
       [id, companyId],
     )
     return rows[0] ?? null
@@ -49,7 +49,7 @@ export class SalesReturnRepository {
   }
   async invoice(connection: QueryExecutor, id: number, companyId: number) {
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT si.*,c.receivable_account_id FROM sales_invoices si INNER JOIN customers c ON c.id=si.customer_id WHERE si.id=? AND si.company_id=? AND si.status IN ('posted','partially_paid','paid') LIMIT 1 FOR UPDATE`,
+      `SELECT si.*,si.control_account_id AS receivable_account_id FROM sales_invoices si INNER JOIN customers c ON c.id=si.customer_id WHERE si.id=? AND si.company_id=? AND si.status IN ('posted','partially_paid','paid') LIMIT 1 FOR UPDATE`,
       [id, companyId],
     )
     return rows[0] ?? null

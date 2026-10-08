@@ -38,6 +38,7 @@ export interface JournalLineWrite {
   credit: string
   currencyDebit?: string
   currencyCredit?: string
+  currencyCode?: string | null
   exchangeRate?: string
 }
 
@@ -290,8 +291,8 @@ export class JournalRepository {
       await connection.execute(
         `INSERT INTO journal_lines (
            journal_id, line_number, account_id, description, cost_center_id, project_id,
-           debit, credit, currency_debit, currency_credit, exchange_rate
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           debit, credit, currency_debit, currency_credit, exchange_rate, currency_code
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           journalId,
           index + 1,
@@ -304,6 +305,7 @@ export class JournalRepository {
           line.currencyDebit ?? line.debit,
           line.currencyCredit ?? line.credit,
           line.exchangeRate ?? '1.00000000',
+          line.currencyCode ?? null,
         ],
       )
     }

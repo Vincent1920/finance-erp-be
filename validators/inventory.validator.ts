@@ -31,6 +31,7 @@ export const inventoryCardQuerySchema = z
     date_to: isoDateSchema,
     page: z.string().optional(),
     limit: z.string().optional(),
+    search: z.string().trim().max(100).optional(),
   })
   .refine((value) => value.date_from <= value.date_to, {
     message: 'date_from tidak boleh setelah date_to',

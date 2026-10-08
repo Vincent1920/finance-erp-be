@@ -46,6 +46,19 @@ const allowedXlsxMime = new Set([
   'application/zip',
 ])
 
+function bankDateValue(input: unknown, format = 'DD/MM/YYYY'): unknown {
+  const value = String(input ?? '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value
+  const parts = value.match(/^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/)
+  if (!parts) return value
+  const [, first, second, third] = parts
+  if (format === 'YYYY-MM-DD') return `${first}-${second!.padStart(2, '0')}-${third!.padStart(2, '0')}`
+  if (!/^\d{4}$/.test(third!)) return value
+  const day = format === 'MM/DD/YYYY' ? second : first
+  const month = format === 'MM/DD/YYYY' ? first : second
+  return `${third}-${month!.padStart(2, '0')}-${day!.padStart(2, '0')}`
+}
+
 export function normalizeHeader(value: unknown) {
   return String(value ?? '')
     .replace(/^\uFEFF/, '')
@@ -117,7 +130,7 @@ function parseCsvFile(buffer: Uint8Array, type: ImportType): ParsedTabularFile {
     }>
     const rows = records.map(({ record, info }, index) => ({
       rowNumber: Number(info?.lines ?? index + 2),
-      data: record,
+      data: type === 'bank_statement' ? { ...record, transaction_date: bankDateValue(record.transaction_date) } : record,
     }))
     assertRowLimit(rows)
     return { headers: normalizedHeaders, rows, warnings: [] }
@@ -201,7 +214,7 @@ async function parseXlsxFile(buffer: Uint8Array, type: ImportType): Promise<Pars
         header,
         Boolean(workbook.properties.date1904),
       )
-      data[header] = value
+      data[header] = type === 'bank_statement' && header === 'transaction_date' ? bankDateValue(value) : value
       if (String(value ?? '').trim() !== '') hasValue = true
     }
     if (hasValue) rows.push({ rowNumber, data })
@@ -246,6 +259,110 @@ export async function parseImportFile(
   const parsed =
     extension === 'csv' ? parseCsvFile(buffer, type) : await parseXlsxFile(buffer, type)
   return { parsed, buffer, extension }
+}
+
+type BankMapping = {
+  delimiter: ',' | ';' | '\t'
+  date_format: 'DD/MM/YYYY' | 'YYYY-MM-DD' | 'MM/DD/YYYY'
+  decimal_separator: 'dot' | 'comma'
+  header_row: number
+  column_mapping: Record<string, string>
+}
+
+export async function parseMappedBankFile(
+  file: ImportFileLike,
+  mapping: BankMapping,
+  bankAccountCode: string,
+): Promise<{ parsed: ParsedTabularFile; buffer: Uint8Array; extension: 'csv' | 'xlsx' }> {
+  if (file.size <= 0 || file.size > MAX_IMPORT_FILE_SIZE)
+    throw new ValidationError('Ukuran file harus lebih dari 0 dan maksimum 5 MB')
+  const extension = file.name.toLowerCase().endsWith('.csv')
+    ? 'csv'
+    : file.name.toLowerCase().endsWith('.xlsx')
+      ? 'xlsx'
+      : null
+  if (!extension) throw new ValidationError('Format file harus CSV atau XLSX')
+  const buffer = new Uint8Array(await file.arrayBuffer())
+  let values: unknown[][] = []
+  if (extension === 'csv') {
+    let content: string
+    try {
+      content = new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+    } catch {
+      throw new ValidationError('CSV harus menggunakan encoding UTF-8')
+    }
+    values = parseCsv(content, {
+      bom: true,
+      delimiter: mapping.delimiter,
+      skip_empty_lines: true,
+      relax_column_count: false,
+      trim: true,
+    }) as unknown[][]
+  } else {
+    const workbook = new ExcelJS.Workbook()
+    await workbook.xlsx.load(buffer as unknown as ExcelJS.Buffer)
+    const sheet = workbook.worksheets.find((item) => item.actualRowCount > 0)
+    if (!sheet) throw new ValidationError('Workbook tidak memiliki worksheet berisi data')
+    for (let rowNumber = 1; rowNumber <= sheet.actualRowCount; rowNumber += 1) {
+      const row: unknown[] = []
+      for (let column = 1; column <= sheet.actualColumnCount; column += 1)
+        row.push(excelValue(sheet.getRow(rowNumber).getCell(column).value, '', Boolean(workbook.properties.date1904)))
+      values.push(row)
+    }
+  }
+  const headerIndex = mapping.header_row - 1
+  const rawHeaders = values[headerIndex]
+  if (!rawHeaders) throw new ValidationError('Baris judul kolom tidak ditemukan')
+  const headers = rawHeaders.map(normalizeHeader)
+  const columnIndex = (canonical: string) => {
+    const source = mapping.column_mapping[canonical]
+    if (!source) return -1
+    return headers.indexOf(normalizeHeader(source))
+  }
+  const requiredSources = ['transaction_date', 'description', 'balance']
+  for (const field of requiredSources)
+    if (columnIndex(field) < 0)
+      throw new ValidationError(`Kolom ${mapping.column_mapping[field]} tidak ditemukan pada file. Untuk template FINORA, pilih Template standar Finora; untuk file bank, periksa pemetaan kolom.`)
+  const dateValue = (input: unknown) => {
+    if (input instanceof Date) return input.toISOString().slice(0, 10)
+    return bankDateValue(input, mapping.date_format)
+  }
+  const numberValue = (input: unknown) => {
+    if (typeof input === 'number') return input
+    let value = String(input ?? '').trim().replace(/[^0-9,.-]/g, '')
+    if (mapping.decimal_separator === 'comma') value = value.replaceAll('.', '').replace(',', '.')
+    else value = value.replaceAll(',', '')
+    const parsed = Number(value || 0)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  const statementNumber = `${bankAccountCode}-${file.name.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 60)}`
+  const rows: ParsedImportRow[] = []
+  for (let index = headerIndex + 1; index < values.length; index += 1) {
+    const source = values[index]!
+    if (source.every((cell) => String(cell ?? '').trim() === '')) continue
+    const read = (field: string) => {
+      const position = columnIndex(field)
+      return position < 0 ? '' : source[position]
+    }
+    const amount = numberValue(read('amount'))
+    rows.push({
+      rowNumber: index + 1,
+      data: {
+        bank_account_code: bankAccountCode,
+        statement_number: statementNumber,
+        transaction_date: dateValue(read('transaction_date')),
+        description: String(read('description') ?? ''),
+        reference: String(read('reference') ?? ''),
+        debit: columnIndex('amount') >= 0 ? Math.max(0, amount) : numberValue(read('debit')),
+        credit: columnIndex('amount') >= 0 ? Math.max(0, -amount) : numberValue(read('credit')),
+        balance: numberValue(read('balance')),
+      },
+    })
+  }
+  assertRowLimit(rows)
+  const canonicalHeaders = [...getImportDefinition('bank_statement').requiredColumns]
+  validateHeaders(canonicalHeaders, 'bank_statement')
+  return { parsed: { headers: canonicalHeaders, rows, warnings: [] }, buffer, extension }
 }
 
 export function safeSpreadsheetValue(value: unknown) {

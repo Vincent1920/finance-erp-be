@@ -23,7 +23,7 @@ import type { SeedConnection } from './types'
 const COMPANY_ID = 1
 const DEMO_EMAIL = 'demo.admin@finora.local'
 const DEMO_PASSWORD = 'DemoFinance2026!'
-const actor = { userId: 0, requestId: 'demo-seed', ip: '127.0.0.1' }
+const actor: { userId: number; requestId?: string; ip: string } = { userId: 0, ip: '127.0.0.1' }
 
 type Lookup = Record<string, number>
 type StateRow = RowDataPacket & { id: number; status: string }
@@ -40,7 +40,10 @@ const accounts = [
   ['2101', 'Accounts Payable', 'liability', 'credit', 'operating'],
   ['2111', 'Goods Received Not Invoiced', 'liability', 'credit', 'operating'],
   ['2201', 'Output VAT', 'liability', 'credit', 'operating'],
+  ['2202', 'Withholding Tax Payable', 'liability', 'credit', 'operating'],
   ['3101', 'Owner Capital', 'equity', 'credit', 'financing'],
+  ['3102', 'Retained Earnings', 'equity', 'credit', 'financing'],
+  ['3103', 'Current Year Earnings', 'equity', 'credit', 'operating'],
   ['4101', 'Product Sales', 'revenue', 'credit', 'operating'],
   ['4102', 'Service Revenue', 'revenue', 'credit', 'operating'],
   ['5101', 'Cost of Goods Sold', 'cogs', 'debit', 'operating'],
@@ -52,9 +55,42 @@ const accounts = [
   ['6106', 'Transportation Expense', 'expense', 'debit', 'operating'],
   ['6107', 'Depreciation Expense', 'expense', 'debit', 'non_cash'],
   ['6108', 'Professional Service Expense', 'expense', 'debit', 'operating'],
+  ['6109', 'General Purchase Expense', 'expense', 'debit', 'operating'],
   ['7101', 'Interest Income', 'other_income', 'credit', 'operating'],
+  ['7102', 'Foreign Exchange Gain', 'other_income', 'credit', 'operating'],
+  ['7103', 'Inventory Adjustment Gain', 'other_income', 'credit', 'operating'],
   ['8101', 'Bank Administration Expense', 'other_expense', 'debit', 'operating'],
+  ['8102', 'Foreign Exchange Loss', 'other_expense', 'debit', 'operating'],
+  ['8103', 'Inventory Adjustment Loss', 'other_expense', 'debit', 'operating'],
 ] as const
+
+const accountHeaders = [
+  ['1000', 'Aset', 'asset', 'debit', null, 0],
+  ['1100', 'Aset Lancar', 'asset', 'debit', '1000', 1],
+  ['1120', 'Piutang, Persediaan, dan Pajak Dibayar', 'asset', 'debit', '1100', 2],
+  ['1200', 'Aset Tetap', 'asset', 'debit', '1000', 1],
+  ['2000', 'Liabilitas', 'liability', 'credit', null, 0],
+  ['2100', 'Liabilitas Lancar', 'liability', 'credit', '2000', 1],
+  ['3000', 'Ekuitas', 'equity', 'credit', null, 0],
+  ['4000', 'Pendapatan Usaha', 'revenue', 'credit', null, 0],
+  ['5000', 'Harga Pokok Penjualan', 'cogs', 'debit', null, 0],
+  ['6000', 'Beban Operasional', 'expense', 'debit', null, 0],
+  ['7000', 'Pendapatan Lain-lain', 'other_income', 'credit', null, 0],
+  ['8000', 'Beban Lain-lain', 'other_expense', 'debit', null, 0],
+] as const
+
+const accountParents: Record<string, string> = {
+  '1101': '1100', '1102': '1100', '1103': '1100',
+  '1130': '1120', '1140': '1120', '1150': '1120',
+  '1201': '1200', '1202': '1200',
+  '2101': '2100', '2111': '2100', '2201': '2100', '2202': '2100',
+  '3101': '3000', '3102': '3000', '3103': '3000',
+  '4101': '4000', '4102': '4000', '5101': '5000',
+  '6101': '6000', '6102': '6000', '6103': '6000', '6104': '6000', '6105': '6000',
+  '6106': '6000', '6107': '6000', '6108': '6000', '6109': '6000',
+  '7101': '7000', '7102': '7000', '7103': '7000',
+  '8101': '8000', '8102': '8000', '8103': '8000',
+}
 
 const itemData = [
   ['ITEM-DEMO-001', 'Laptop Office 14 Inch', 'inventory', 'UNIT', 7_000_000, 8_500_000],
@@ -123,21 +159,66 @@ async function seedMaster(connection: SeedConnection) {
     [actor.userId],
   )
 
-  for (const [code, name, type, normal, cashFlow] of accounts) {
+  for (const [code, name, type, normal, , level] of accountHeaders) {
     await connection.execute(
-      `INSERT INTO accounts(company_id,code,name,account_type,normal_balance,is_header,is_posting,is_active,allow_manual_journal,cash_flow_category)
-       VALUES(?,?,?,?,?,FALSE,TRUE,TRUE,TRUE,?)
+      `INSERT INTO accounts(company_id,code,name,account_type,normal_balance,parent_id,level,is_header,is_posting,is_active,allow_manual_journal)
+       VALUES(?,?,?,?,?,NULL,?,TRUE,FALSE,TRUE,FALSE)
        ON DUPLICATE KEY UPDATE name=VALUES(name),account_type=VALUES(account_type),normal_balance=VALUES(normal_balance),
-         is_header=FALSE,is_posting=TRUE,is_active=TRUE,allow_manual_journal=TRUE,cash_flow_category=VALUES(cash_flow_category),deleted_at=NULL`,
-      [COMPANY_ID, code, name, type, normal, cashFlow],
+         parent_id=NULL,level=VALUES(level),is_header=TRUE,is_posting=FALSE,is_active=TRUE,allow_manual_journal=FALSE,deleted_at=NULL`,
+      [COMPANY_ID, code, name, type, normal, level],
     )
   }
-  const accountIds = await idMap(connection, 'accounts', 'code')
+  let accountIds = await idMap(connection, 'accounts', 'code')
+  for (const [code, , , , parentCode, level] of accountHeaders) {
+    await connection.execute(
+      'UPDATE accounts SET parent_id=?,level=? WHERE company_id=? AND code=?',
+      [parentCode ? accountIds[parentCode] : null, level, COMPANY_ID, code],
+    )
+  }
+  for (const [code, name, type, normal, cashFlow] of accounts) {
+    const parentId = accountIds[accountParents[code]]
+    const parentHeader = accountHeaders.find(([headerCode]) => headerCode === accountParents[code])
+    const level = Number(parentHeader?.[5] ?? 0) + 1
+    await connection.execute(
+      `INSERT INTO accounts(company_id,code,name,account_type,normal_balance,parent_id,level,is_header,is_posting,is_active,allow_manual_journal,cash_flow_category)
+       VALUES(?,?,?,?,?,?,?,FALSE,TRUE,TRUE,TRUE,?)
+       ON DUPLICATE KEY UPDATE name=VALUES(name),account_type=VALUES(account_type),normal_balance=VALUES(normal_balance),
+         parent_id=VALUES(parent_id),level=VALUES(level),is_header=FALSE,is_posting=TRUE,is_active=TRUE,
+         allow_manual_journal=TRUE,cash_flow_category=VALUES(cash_flow_category),deleted_at=NULL`,
+      [COMPANY_ID, code, name, type, normal, parentId, level, cashFlow],
+    )
+  }
+  await connection.execute(
+    `DELETE FROM accounts
+     WHERE company_id=? AND code='1110' AND is_header=TRUE
+       AND NOT EXISTS (SELECT 1 FROM (SELECT parent_id FROM accounts) child WHERE child.parent_id=accounts.id)`,
+    [COMPANY_ID],
+  )
+  accountIds = await idMap(connection, 'accounts', 'code')
+  const mappingAccounts: Record<string, string> = {
+    AR_CONTROL: '1130', AP_CONTROL: '2101', INVENTORY: '1140', COGS: '5101', REVENUE: '4101',
+    PURCHASE_EXPENSE: '6109', OUTPUT_VAT: '2201', INPUT_VAT: '1150', WITHHOLDING_TAX: '2202',
+    CASH: '1101', BANK: '1102', BANK_FEE: '8101', FX_GAIN: '7102', FX_LOSS: '8102',
+    GRNI: '2111', STOCK_GAIN: '7103', STOCK_LOSS: '8103', RETAINED_EARNINGS: '3102', CURRENT_YEAR_EARNINGS: '3103',
+  }
+  for (const [mappingKey, accountCode] of Object.entries(mappingAccounts)) {
+    await connection.execute(
+      `INSERT INTO account_mappings(company_id,mapping_key,account_id,description,created_by,updated_by)
+       VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE account_id=VALUES(account_id),updated_by=VALUES(updated_by)`,
+      [COMPANY_ID, mappingKey, accountIds[accountCode], `Default ${mappingKey}`, actor.userId, actor.userId],
+    )
+  }
   await connection.execute(
     `INSERT INTO settings(company_id,setting_key,setting_value,category,value_type)
      VALUES(?,'goods_received_not_invoiced_account_id',?,'purchases','account_id')
      ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),category=VALUES(category),value_type=VALUES(value_type)`,
     [COMPANY_ID, String(accountIds['2111'])],
+  )
+  await connection.execute(
+    `INSERT INTO settings(company_id,setting_key,setting_value,category,value_type)
+     VALUES(?,'accounting.allow_self_approval','true','accounting','boolean')
+     ON DUPLICATE KEY UPDATE setting_value='true',category='accounting',value_type='boolean'`,
+    [COMPANY_ID],
   )
 
   for (const [code, name, symbol] of [
@@ -976,6 +1057,7 @@ export async function verifyDemoData(): Promise<DemoVerification> {
       'SELECT COUNT(*) total FROM accounts WHERE company_id=1 AND code IN (' +
       accounts.map(() => '?').join(',') +
       ')',
+    AccountMappings: 'SELECT COUNT(*) total FROM account_mappings WHERE company_id=1',
     Customers:
       "SELECT COUNT(*) total FROM customers WHERE company_id=1 AND code LIKE 'CUST-DEMO-%'",
     Suppliers: "SELECT COUNT(*) total FROM suppliers WHERE company_id=1 AND code LIKE 'SUP-DEMO-%'",
@@ -1026,6 +1108,7 @@ export async function verifyDemoData(): Promise<DemoVerification> {
     Company: 1,
     Users: 1,
     Accounts: 25,
+    AccountMappings: 19,
     Customers: 20,
     Suppliers: 15,
     Units: 5,

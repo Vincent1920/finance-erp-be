@@ -1,4 +1,5 @@
 import type { RowDataPacket } from 'mysql2/promise'
+import { prepareDirectPosting } from './WorkflowPolicyService'
 import { transaction } from '../config/database'
 import { InvoiceRepository, type PurchaseInvoiceWrite } from '../repositories/InvoiceRepository'
 import type { QueryExecutor } from '../types/database'
@@ -20,6 +21,7 @@ import { BusinessValidationService } from './BusinessValidationService'
 import { InventoryCostingService } from './InventoryCostingService'
 import { NumberSequenceService } from './NumberSequenceService'
 import { PostingService, type JournalLineInput } from './PostingService'
+import { AccountMappingService } from './AccountMappingService'
 import {
   duplicateInvoiceError,
   importedPurchaseInvoiceSchema,
@@ -44,6 +46,7 @@ export class PurchaseInvoiceService {
     private sequences = new NumberSequenceService(),
     private posting = new PostingService(),
     private inventory = new InventoryCostingService(),
+    private mappings = new AccountMappingService(),
   ) {}
 
   list(companyId: number, query: Parameters<InvoiceRepository['listPurchase']>[1]) {
@@ -190,28 +193,35 @@ export class PurchaseInvoiceService {
     return transaction(async (connection) => {
       const invoice = await this.repository.findPurchase(connection, id, companyId, true)
       if (!invoice) throw new NotFoundError('Purchase invoice tidak ditemukan')
-      if (invoice.status !== 'approved')
+      if (invoice.status !== 'approved' && !(await prepareDirectPosting(connection,companyId,'purchase_invoices',id,String(invoice.status),context.userId)))
         throw new ConflictError('Hanya purchase invoice Approved yang dapat diposting')
-      if (!invoice.payable_account_id)
-        throw new ValidationError('Akun utang supplier belum dikonfigurasi')
+      const payableAccountId = await this.mappings.resolve(connection, companyId, 'AP_CONTROL', invoice.payable_account_id ? Number(invoice.payable_account_id) : null)
       const lines = await this.repository.purchaseLines(connection, id)
       const debits = new Map<number, string>()
       const withholdingCredits = new Map<number, string>()
       const movementIds: number[] = []
       for (const line of lines) {
+        const expenseAccountId = await this.mappings.resolve(
+          connection,
+          companyId,
+          line.item_type === 'inventory' ? 'INVENTORY' : 'PURCHASE_EXPENSE',
+          line.expense_account_id ? Number(line.expense_account_id) : null,
+        )
         this.addAccount(
           debits,
-          Number(line.expense_account_id),
+          expenseAccountId,
           String(line.base_subtotal),
           'Akun persediaan/beban item belum dikonfigurasi',
         )
-        if (compareDecimal(String(line.base_tax_amount), '0') > 0)
+        if (compareDecimal(String(line.base_tax_amount), '0') > 0) {
+          const inputTaxAccountId = await this.mappings.resolve(connection, companyId, 'INPUT_VAT', line.input_tax_account_id ? Number(line.input_tax_account_id) : null)
           this.addAccount(
             debits,
-            Number(line.input_tax_account_id),
+            inputTaxAccountId,
             String(line.base_tax_amount),
             'Akun pajak masukan belum dikonfigurasi',
           )
+        }
         if (compareDecimal(String(line.base_withholding_amount ?? '0'), '0') > 0)
           this.addAccount(
             withholdingCredits,
@@ -254,7 +264,7 @@ export class PurchaseInvoiceService {
         credit: '0',
       }))
       journals.push({
-        accountId: Number(invoice.payable_account_id),
+        accountId: payableAccountId,
         description: String(invoice.invoice_number),
         debit: '0',
         credit: String(invoice.base_grand_total),
@@ -289,8 +299,8 @@ export class PurchaseInvoiceService {
           id,
           companyId,
           ['approved'],
-          "status='posted', journal_id=?, posted_by=?, posted_at=NOW()",
-          [journalId, context.userId],
+          "status='posted', journal_id=?, control_account_id=?, posted_by=?, posted_at=NOW()",
+          [journalId, payableAccountId, context.userId],
         ))
       )
         throw new ConflictError('Status purchase invoice telah berubah')
@@ -613,6 +623,20 @@ export class PurchaseInvoiceService {
       if (!invoice) throw new NotFoundError('Purchase invoice tidak ditemukan')
       if (!from.includes(String(invoice.status)))
         throw new ConflictError(`Purchase invoice ${invoice.status} tidak dapat diproses`)
+      if (action === 'submit')
+        await this.validation.ensurePurchaseOrderPolicy(
+          connection,
+          companyId,
+          invoice.purchase_order_id ? Number(invoice.purchase_order_id) : null,
+          invoice.goods_receipt_id ? Number(invoice.goods_receipt_id) : null,
+        )
+      if (action === 'approve')
+        await this.validation.ensureIndependentApprover(
+          connection,
+          companyId,
+          invoice.submitted_by ? Number(invoice.submitted_by) : null,
+          context.userId,
+        )
       if (
         !(await this.repository.transitionPurchase(connection, id, companyId, from, fields, values))
       )

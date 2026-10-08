@@ -5,6 +5,7 @@ import {
   periodCloseQuerySchema,
   periodCloseValidationSchema,
   periodReopenSchema,
+  periodReopenDecisionSchema,
 } from '../validators/period-closing.validator'
 import { ok } from '../utils/response'
 import { requestIp } from '../utils/request-context'
@@ -48,12 +49,22 @@ export class PeriodClosingController {
   reopen = async (c: Context) =>
     ok(
       c,
-      await this.service.reopen(
+      await this.service.requestReopen(
         c.get('user').companyId,
         positiveIdSchema.parse(c.req.param('id')),
         periodReopenSchema.parse(await c.req.json()).reason,
         context(c),
       ),
-      'Periode berhasil dibuka kembali',
+      'Permintaan pembukaan kembali dikirim',
     )
+
+  approveReopen = async (c: Context) => {
+    const input = periodReopenDecisionSchema.parse(await c.req.json())
+    return ok(c, await this.service.decideReopen(c.get('user').companyId, positiveIdSchema.parse(c.req.param('id')), 'approved', input.notes, context(c)), 'Pembukaan kembali disetujui')
+  }
+
+  rejectReopen = async (c: Context) => {
+    const input = periodReopenDecisionSchema.parse(await c.req.json())
+    return ok(c, await this.service.decideReopen(c.get('user').companyId, positiveIdSchema.parse(c.req.param('id')), 'rejected', input.notes, context(c)), 'Pembukaan kembali ditolak')
+  }
 }

@@ -1,3 +1,4 @@
+import {assertUserQuota} from './TenantAccessService'
 import { transaction } from '../config/database'
 import { SystemUserRepository } from '../repositories/SystemUserRepository'
 import { ConflictError, ForbiddenError, NotFoundError } from '../utils/AppError'
@@ -40,6 +41,7 @@ export class SystemUserService {
   ) {
     const passwordHash = await hashPassword(input.password)
     return transaction(async (connection) => {
+      if(input.status==='active')await assertUserQuota(connection,actor.companyId)
       const roleIds = [...new Set(input.role_ids)]
       const validRoles = await this.users.validateRoles(
         roleIds,
@@ -49,6 +51,8 @@ export class SystemUserService {
       )
       if (validRoles.length !== roleIds.length)
         throw new ConflictError('Satu atau lebih peran tidak valid untuk perusahaan ini')
+      if (input.status === 'active' && !await this.users.hasAccess(roleIds, actor.companyId, connection))
+        throw new ConflictError('Pilih peran aktif yang mempunyai hak akses sebelum membuat akun login')
       const id = await this.users.create(
         actor.companyId,
         { ...input, password: passwordHash },
@@ -74,11 +78,23 @@ export class SystemUserService {
     })
   }
 
-  async update(actor: SystemActor, id: number, input: { name?: string; email?: string }) {
+  async update(actor: SystemActor, id: number, input: { name?: string; email?: string; password?: string; status?: 'active'|'inactive'|'locked'; role_ids?: number[] }) {
+    const passwordHash = input.password ? await hashPassword(input.password) : undefined
     return transaction(async (connection) => {
       const oldValue = await this.users.find(id, actor.companyId, connection)
       if (!oldValue) throw new NotFoundError('Pengguna tidak ditemukan')
-      await this.users.update(id, actor.companyId, input, actor.id, connection)
+      const { password: _password, status, role_ids, ...metadata } = input
+      if (actor.id === id && status && status !== 'active')
+        throw new ForbiddenError('Tidak dapat menonaktifkan atau mengunci akun sendiri')
+      const assigned = role_ids === undefined ? (oldValue.roles as Array<{id:number}>).map(role => Number(role.id)) : [...new Set(role_ids)]
+      if (role_ids !== undefined && (await this.users.validateRoles(assigned, actor.companyId, actor.roles.includes('super-admin'), connection)).length !== assigned.length)
+        throw new ConflictError('Satu atau lebih peran tidak valid untuk perusahaan ini')
+      if ((status ?? oldValue.status) === 'active' && !await this.users.hasAccess(assigned, actor.companyId, connection))
+        throw new ConflictError('Pengguna aktif harus mempunyai peran dengan hak akses')
+      await this.users.update(id, actor.companyId, metadata, actor.id, connection)
+      if (role_ids !== undefined) await this.users.assignRoles(id, assigned, connection)
+      if (passwordHash) await this.users.resetPassword(id, actor.companyId, passwordHash, actor.id, connection)
+      if (status !== undefined) await this.users.setStatus(id, actor.companyId, status, actor.id, connection)
       const user = await this.users.find(id, actor.companyId, connection)
       await this.audit.log(connection, {
         companyId: actor.companyId,
@@ -106,6 +122,9 @@ export class SystemUserService {
     return transaction(async (connection) => {
       const oldValue = await this.users.find(id, actor.companyId, connection)
       if (!oldValue) throw new NotFoundError('Pengguna tidak ditemukan')
+      const assigned = (oldValue.roles as Array<{id:number}>).map(role => Number(role.id))
+      if (status === 'active' && !await this.users.hasAccess(assigned, actor.companyId, connection))
+        throw new ConflictError('Akun belum mempunyai peran aktif dengan hak akses. Atur perannya terlebih dahulu')
       await this.users.setStatus(id, actor.companyId, status, actor.id, connection)
       const user = await this.users.find(id, actor.companyId, connection)
       await this.audit.log(connection, {
@@ -160,6 +179,8 @@ export class SystemUserService {
         throw new ConflictError('Satu atau lebih peran tidak valid untuk perusahaan ini')
       if (id === actor.id && roleIds.length === 0)
         throw new ForbiddenError('Tidak dapat menghapus seluruh peran akun sendiri')
+      if (oldValue.status === 'active' && !await this.users.hasAccess(roleIds, actor.companyId, connection))
+        throw new ConflictError('Pengguna aktif harus mempunyai peran dengan hak akses')
       await this.users.assignRoles(id, roleIds, connection)
       const user = await this.users.find(id, actor.companyId, connection)
       await this.audit.log(connection, {

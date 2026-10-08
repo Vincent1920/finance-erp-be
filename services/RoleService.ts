@@ -68,7 +68,14 @@ export class RoleService {
       if (!oldValue) throw new NotFoundError('Peran tidak ditemukan')
       if (oldValue.is_system || oldValue.company_id === null)
         throw new ForbiddenError('Peran sistem tidak dapat diubah')
-      await this.roles.update(id, actor.companyId, input, connection)
+      const { permission_ids, ...metadata } = input
+      if (permission_ids !== undefined) {
+        const ids = [...new Set(permission_ids)]
+        if ((await this.roles.validatePermissions(ids, connection)).length !== ids.length)
+          throw new ConflictError('Satu atau lebih hak akses tidak valid')
+        await this.roles.assignPermissions(id, ids, connection)
+      }
+      await this.roles.update(id, actor.companyId, metadata, connection)
       const role = await this.roles.find(id, actor.companyId, connection)
       await this.audit.log(connection, {
         companyId: actor.companyId,

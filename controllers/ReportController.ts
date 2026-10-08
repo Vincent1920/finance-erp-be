@@ -1,4 +1,5 @@
 import type { Context } from 'hono'
+import { AccountingControlService } from '../services/AccountingControlService'
 
 import { ReportingService } from '../services/ReportingService'
 import { ok, paginated } from '../utils/response'
@@ -8,10 +9,21 @@ import {
   dateRangeQuerySchema,
   generalLedgerQuerySchema,
   inventoryReportQuerySchema,
+  reconciliationCaseSchema,
+  reconciliationDetailQuerySchema,
 } from '../validators/report.validator'
+import { ReconciliationWorkspaceService } from '../services/ReconciliationWorkspaceService'
+import { requestIp } from '../utils/request-context'
 
 export class ReportController {
-  constructor(private service = new ReportingService()) {}
+  controls = async (c: Context) => {
+    const query = asOfQuerySchema.parse(c.req.query())
+    return ok(c, await new AccountingControlService().overview(c.get('user').companyId, query.as_of_date))
+  }
+  constructor(
+    private service = new ReportingService(),
+    private reconciliation = new ReconciliationWorkspaceService(),
+  ) {}
 
   generalLedger = async (c: Context) => {
     const query = generalLedgerQuerySchema.parse(c.req.query())
@@ -93,6 +105,21 @@ export class ReportController {
   subledger = async (c: Context) => {
     const query = asOfQuerySchema.parse(c.req.query())
     return ok(c, await this.service.subledger(c.get('user').companyId, query.as_of_date))
+  }
+
+  reconciliationDetail = async (c: Context) => {
+    const query = reconciliationDetailQuerySchema.parse(c.req.query())
+    return ok(c, await this.reconciliation.detail(
+      c.get('user').companyId, query.reconciliation_type, query.account_id, query.as_of_date,
+    ))
+  }
+
+  reconciliationCase = async (c: Context) => {
+    const input = reconciliationCaseSchema.parse(await c.req.json())
+    const user = c.get('user')
+    return ok(c, await this.reconciliation.saveCase(user.companyId, input, {
+      userId: user.id, requestId: c.get('requestId'), ip: requestIp(c),
+    }), 'Tindak lanjut rekonsiliasi berhasil disimpan')
   }
 
   budgetVsActual = async (c: Context) => {

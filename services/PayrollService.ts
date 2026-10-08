@@ -1,3 +1,5 @@
+import { PayrollComponentService } from './PayrollComponentService'
+import { componentTotals, readComponentSnapshot } from './payroll-component-calculation'
 import type { PoolConnection, RowDataPacket } from 'mysql2/promise'
 import { db, transaction } from '../config/database'
 import { ConflictError, NotFoundError, ValidationError } from '../utils/AppError'
@@ -33,7 +35,7 @@ export class PayrollService {
   private posting = new PostingService()
 
   async overview(companyId: number, period: string) {
-    const [[employees], [runs], [accounts], [policy]] = await Promise.all([
+    const [[employees], [runs], [accounts], [policy], [departments]] = await Promise.all([
       db.query<Row[]>(
         `SELECT * FROM payroll_employees WHERE company_id=? ORDER BY is_active DESC,name`,
         [companyId],
@@ -50,10 +52,23 @@ export class PayrollService {
         `SELECT * FROM payroll_policies WHERE company_id=? AND effective_from<=LAST_DAY(CONCAT(?,'-01')) AND (effective_to IS NULL OR effective_to>=CONCAT(?,'-01')) ORDER BY effective_from DESC LIMIT 1`,
         [companyId, period, period],
       ),
+      db.query<Row[]>('SELECT id,code,name,is_active FROM departments WHERE company_id=? ORDER BY name',[companyId]),
     ])
     const run = runs.find((r) => r.period === period) ?? null
     const detail = run ? await this.detail(companyId, Number(run.id)) : null
-    return { period, employees, runs, accounts, policy: policy[0] ?? null, current_run: detail }
+    return { period, employees, runs, accounts, departments, components: await new PayrollComponentService().list(companyId), policy: policy[0] ?? null, current_run: detail }
+  }
+
+  private async resolveDepartment(cx:PoolConnection,companyId:number,input:Record<string,any>,previousId:number|null) {
+    if (input.department_id === null) {input.department=null;return}
+    if (input.department_id !== undefined) {
+      const [rows]=await cx.query<Row[]>('SELECT id,name,is_active FROM departments WHERE id=? AND company_id=? FOR SHARE',[input.department_id,companyId])
+      const department=rows[0]
+      if (!department || (!department.is_active && Number(department.id)!==Number(previousId)))throw new ValidationError('Pilih departemen aktif dari perusahaan ini')
+      input.department=department.name;return
+    }
+    // Older integrations may still send the department name.
+    if(input.department){const [rows]=await cx.query<Row[]>('SELECT id,name FROM departments WHERE company_id=? AND name=? AND is_active=TRUE FOR SHARE',[companyId,String(input.department).trim()]);if(rows[0]){input.department_id=rows[0].id;input.department=rows[0].name}}
   }
 
   async saveEmployee(
@@ -69,6 +84,7 @@ export class PayrollService {
       'npwp',
       'email',
       'department',
+      'department_id',
       'position',
       'employment_type',
       'ptkp_status',
@@ -84,24 +100,137 @@ export class PayrollService {
       'fixed_allowance',
       'is_active',
     ]
-    if (id) {
-      const [result] = await db.query<any>(
-        `UPDATE payroll_employees SET ${fields.map((f) => `${f}=?`).join(',')} WHERE id=? AND company_id=?`,
-        [...fields.map((f) => input[f] ?? null), id, companyId],
-      )
-      if (!result.affectedRows) throw new NotFoundError('Pegawai tidak ditemukan')
-      return { id }
-    }
-    const [result] = await db.query<any>(
-      `INSERT INTO payroll_employees(company_id,${fields.join(',')},created_by) VALUES(?,${fields.map(() => '?').join(',')},?)`,
-      [companyId, ...fields.map((f) => input[f] ?? null), actor.userId],
+    return transaction(async (cx) => {
+      let employeeId = id
+      let previous: Row | null = null
+      if (id) {
+        const [rows] = await cx.query<Row[]>(
+          'SELECT * FROM payroll_employees WHERE id=? AND company_id=? FOR UPDATE',
+          [id, companyId],
+        )
+        previous = rows[0] ?? null
+        if (!previous) throw new NotFoundError('Pegawai tidak ditemukan')
+        if (input.department_id === undefined && previous.department_id != null && input.department === previous.department) input.department_id = previous.department_id
+        await this.resolveDepartment(cx,companyId,input,previous.department_id)
+        const salaryChanged =
+          num(previous.basic_salary) !== num(input.basic_salary) ||
+          num(previous.fixed_allowance) !== num(input.fixed_allowance)
+        if (salaryChanged && (!input.salary_effective_from || !input.salary_change_reason))
+          throw new ValidationError(
+            'Tanggal efektif dan alasan wajib diisi saat gaji atau tunjangan tetap berubah',
+          )
+        if (salaryChanged && input.salary_effective_from < dateOnly(previous.hire_date))
+          throw new ValidationError('Tanggal efektif gaji tidak boleh sebelum tanggal masuk')
+        await cx.query(
+          `UPDATE payroll_employees SET ${fields.map((f) => `${f}=?`).join(',')} WHERE id=? AND company_id=?`,
+          [...fields.map((f) => input[f] ?? null), id, companyId],
+        )
+        if (salaryChanged)
+          await cx.query(
+            `INSERT INTO payroll_compensation_history(company_id,employee_id,effective_from,basic_salary,fixed_allowance,reason,created_by)
+             VALUES(?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE basic_salary=VALUES(basic_salary),fixed_allowance=VALUES(fixed_allowance),reason=VALUES(reason),created_by=VALUES(created_by)`,
+            [
+              companyId,
+              id,
+              input.salary_effective_from,
+              input.basic_salary,
+              input.fixed_allowance,
+              input.salary_change_reason,
+              actor.userId,
+            ],
+          )
+      } else {
+        await this.resolveDepartment(cx,companyId,input,null)
+        const [result] = await cx.query<any>(
+          `INSERT INTO payroll_employees(company_id,${fields.join(',')},created_by) VALUES(?,${fields.map(() => '?').join(',')},?)`,
+          [companyId, ...fields.map((f) => input[f] ?? null), actor.userId],
+        )
+        employeeId = Number(result.insertId)
+        await cx.query(
+          `INSERT INTO payroll_compensation_history(company_id,employee_id,effective_from,basic_salary,fixed_allowance,reason,created_by)
+           VALUES(?,?,?,?,?,?,?)`,
+          [
+            companyId,
+            employeeId,
+            input.salary_effective_from ?? input.hire_date,
+            input.basic_salary,
+            input.fixed_allowance,
+            input.salary_change_reason ?? 'Penetapan gaji awal',
+            actor.userId,
+          ],
+        )
+      }
+      await new AuditService().log(cx, {
+        companyId,
+        userId: actor.userId,
+        module: 'payroll',
+        action: id ? 'employee_update' : 'employee_create',
+        recordType: 'payroll_employee',
+        recordId: employeeId!,
+        recordNumber: input.employee_number,
+        oldValue: previous,
+        newValue: { ...input, id: employeeId },
+        requestId: actor.requestId,
+        ip: actor.ip,
+      })
+      return { id: employeeId }
+    })
+  }
+
+  async compensationHistory(companyId: number, employeeId: number) {
+    const [rows] = await db.query<Row[]>(
+      `SELECT h.*,u.name created_by_name
+         FROM payroll_compensation_history h JOIN users u ON u.id=h.created_by
+        WHERE h.company_id=? AND h.employee_id=? ORDER BY h.effective_from DESC,h.id DESC`,
+      [companyId, employeeId],
     )
-    return { id: Number(result.insertId) }
+    return rows
+  }
+
+  async setEmployeeStatus(
+    companyId: number,
+    id: number,
+    input: { is_active: boolean; effective_date?: string | null; reason: string },
+    actor: Actor,
+  ) {
+    return transaction(async (cx) => {
+      const [rows] = await cx.query<Row[]>(
+        'SELECT id,employee_number,name,hire_date,termination_date,is_active,status_reason FROM payroll_employees WHERE id=? AND company_id=? FOR UPDATE',
+        [id, companyId],
+      )
+      const employee = rows[0]
+      if (!employee) throw new NotFoundError('Pegawai tidak ditemukan')
+      if (Boolean(employee.is_active) === input.is_active)
+        throw new ConflictError(input.is_active ? 'Pegawai sudah aktif' : 'Pegawai sudah nonaktif')
+      if (!input.is_active && input.effective_date! < dateOnly(employee.hire_date))
+        throw new ValidationError('Tanggal berhenti tidak boleh sebelum tanggal masuk')
+
+      await cx.query(
+        `UPDATE payroll_employees
+            SET is_active=?,termination_date=?,status_reason=?,status_changed_at=NOW(),status_changed_by=?
+          WHERE id=? AND company_id=?`,
+        [input.is_active, input.is_active ? null : input.effective_date, input.reason, actor.userId, id, companyId],
+      )
+      const next = {
+        id, employee_number: employee.employee_number, name: employee.name,
+        is_active: input.is_active,
+        termination_date: input.is_active ? null : input.effective_date,
+        status_reason: input.reason,
+      }
+      await new AuditService().log(cx, {
+        companyId, userId: actor.userId, module: 'payroll',
+        action: input.is_active ? 'employee_reactivate' : 'employee_deactivate',
+        recordType: 'payroll_employee', recordId: id, recordNumber: String(employee.employee_number),
+        oldValue: employee, newValue: next, requestId: actor.requestId, ip: actor.ip,
+      })
+      return next
+    })
   }
 
   async createRun(
     companyId: number,
-    input: { period: string; pay_date: string; notes?: string | null },
+    input: { period: string; pay_date: string; notes?: string | null; proration_method?: string; working_weekdays?: string; prorate_bpjs?: boolean },
     actor: Actor,
   ) {
     return transaction(async (cx) => {
@@ -129,37 +258,125 @@ export class PayrollService {
       )
       const id = Number(result.insertId)
       await cx.query(
-        `INSERT INTO payroll_entries(run_id,employee_id,basic_salary,fixed_allowance)
-        SELECT ?,id,basic_salary,fixed_allowance FROM payroll_employees WHERE company_id=? AND is_active=1 AND hire_date<=? AND (termination_date IS NULL OR termination_date>=?)`,
-        [id, companyId, to, from],
+        `INSERT INTO payroll_entries(run_id,employee_id,basic_salary,fixed_allowance,employment_from,employment_to)
+         SELECT ?,e.id,
+                COALESCE((SELECT h.basic_salary FROM payroll_compensation_history h WHERE h.employee_id=e.id AND h.effective_from<=? ORDER BY h.effective_from DESC,h.id DESC LIMIT 1),e.basic_salary),
+                COALESCE((SELECT h.fixed_allowance FROM payroll_compensation_history h WHERE h.employee_id=e.id AND h.effective_from<=? ORDER BY h.effective_from DESC,h.id DESC LIMIT 1),e.fixed_allowance),e.hire_date,e.termination_date
+           FROM payroll_employees e
+          WHERE e.company_id=? AND e.hire_date<=? AND (e.termination_date IS NULL OR e.termination_date>=?)`,
+        [id, to, to, companyId, to, from],
       )
+      await cx.query('UPDATE payroll_entries SET paid_basic_salary=basic_salary,paid_fixed_allowance=fixed_allowance WHERE run_id=?',[id])
+      await cx.query('UPDATE payroll_runs SET proration_method=?,working_weekdays=?,prorate_bpjs=? WHERE id=?',['none','1,2,3,4,5',false,id])
+      const [createdRuns]=await cx.query<Row[]>('SELECT * FROM payroll_runs WHERE id=?',[id])
       return this.detailWith(cx, companyId, id)
     })
   }
 
-  async updateEntry(companyId: number, runId: number, entryId: number, input: Record<string, any>) {
-    const allowed = Object.keys(input).filter((k) =>
-      [
-        'variable_allowance',
-        'overtime',
-        'bonus',
-        'thr',
-        'rapel',
-        'reimbursement',
-        'absence_deduction',
-        'loan_deduction',
-        'other_deduction',
-        'pph21_override',
-        'pph21_override_reason',
-      ].includes(k),
+  async simulatePolicy(companyId: number, runId: number, proposed: Record<string, unknown>) {
+    const [runs] = await db.query<Row[]>(
+      'SELECT * FROM payroll_runs WHERE id=? AND company_id=?',
+      [runId, companyId],
     )
-    if (!allowed.length) return { id: entryId }
-    const [result] = await db.query<any>(
-      `UPDATE payroll_entries e JOIN payroll_runs r ON r.id=e.run_id SET ${allowed.map((k) => `e.${k}=?`).join(',')} WHERE e.id=? AND e.run_id=? AND r.company_id=? AND r.status='draft'`,
-      [...allowed.map((k) => input[k]), entryId, runId, companyId],
-    )
-    if (!result.affectedRows) throw new ConflictError('Baris hanya dapat diubah saat status Draft')
-    return { id: entryId }
+    const run = runs[0]
+    if (!run) throw new NotFoundError('Payroll tidak ditemukan')
+    const [[policies], [entries]] = await Promise.all([
+      db.query<Row[]>(
+        `SELECT * FROM payroll_policies WHERE company_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to>=?) ORDER BY effective_from DESC LIMIT 1`,
+        [companyId, dateOnly(run.date_to), dateOnly(run.date_from)],
+      ),
+      db.query<Row[]>(
+        `SELECT e.*,m.employee_number,m.name,m.ter_category
+           FROM payroll_entries e JOIN payroll_employees m ON m.id=e.employee_id
+          WHERE e.run_id=? ORDER BY m.name`,
+        [runId],
+      ),
+    ])
+    const current = policies[0]
+    if (!current) throw new ValidationError('Kebijakan payroll periode ini belum tersedia')
+    const totals = {
+      current_employee_bpjs: 0,
+      proposed_employee_bpjs: 0,
+      current_employer_bpjs: 0,
+      proposed_employer_bpjs: 0,
+      current_take_home_pay: 0,
+      proposed_take_home_pay: 0,
+      current_company_cost: 0,
+      proposed_company_cost: 0,
+    }
+    const rows = entries.map((entry) => {
+      const base = entry.bpjs_salary_base != null ? num(entry.bpjs_salary_base) : num(entry.basic_salary) + num(entry.fixed_allowance)
+      const before = calculateBpjs(base, current)
+      const after = calculateBpjs(base, proposed)
+      const employeeBefore = before.healthEmployee + before.jhtEmployee + before.jpEmployee
+      const employeeAfter = after.healthEmployee + after.jhtEmployee + after.jpEmployee
+      const employerBefore =
+        before.healthEmployer + before.jhtEmployer + before.jpEmployer + before.jkkEmployer + before.jkmEmployer
+      const employerAfter =
+        after.healthEmployer + after.jhtEmployer + after.jpEmployer + after.jkkEmployer + after.jkmEmployer
+      const currentThp = num(entry.take_home_pay)
+      const proposedThp = round(currentThp + employeeBefore - employeeAfter)
+      const gross = num(entry.gross_earnings) || base
+      const currentCost = round(gross - num(entry.absence_deduction) + employerBefore)
+      const proposedCost = round(gross - num(entry.absence_deduction) + employerAfter)
+      totals.current_employee_bpjs += employeeBefore
+      totals.proposed_employee_bpjs += employeeAfter
+      totals.current_employer_bpjs += employerBefore
+      totals.proposed_employer_bpjs += employerAfter
+      totals.current_take_home_pay += currentThp
+      totals.proposed_take_home_pay += proposedThp
+      totals.current_company_cost += currentCost
+      totals.proposed_company_cost += proposedCost
+      return {
+        employee_id: Number(entry.employee_id),
+        employee_number: entry.employee_number,
+        name: entry.name,
+        salary_base: base,
+        employee_bpjs_before: employeeBefore,
+        employee_bpjs_after: employeeAfter,
+        employee_bpjs_delta: round(employeeAfter - employeeBefore),
+        employer_bpjs_before: employerBefore,
+        employer_bpjs_after: employerAfter,
+        employer_bpjs_delta: round(employerAfter - employerBefore),
+        take_home_pay_before: currentThp,
+        take_home_pay_after: proposedThp,
+        take_home_pay_delta: round(proposedThp - currentThp),
+        company_cost_before: currentCost,
+        company_cost_after: proposedCost,
+        company_cost_delta: round(proposedCost - currentCost),
+      }
+    })
+    for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] = round(totals[key])
+    return {
+      period: run.period,
+      employee_count: rows.length,
+      note: 'Simulasi tidak mengubah payroll. PPh 21 tetap memakai hasil payroll terakhir; hitung ulang setelah kebijakan disimpan.',
+      totals: {
+        ...totals,
+        employee_bpjs_delta: round(totals.proposed_employee_bpjs - totals.current_employee_bpjs),
+        employer_bpjs_delta: round(totals.proposed_employer_bpjs - totals.current_employer_bpjs),
+        take_home_pay_delta: round(totals.proposed_take_home_pay - totals.current_take_home_pay),
+        company_cost_delta: round(totals.proposed_company_cost - totals.current_company_cost),
+      },
+      rows,
+    }
+  }
+
+  async updateEntry(companyId: number, runId: number, entryId: number, input: Record<string, any>, actor?: Actor) {
+    return transaction(async cx => {
+      const run = await this.runForUpdate(cx,companyId,runId)
+      if (run.status !== 'draft') throw new ConflictError('Baris hanya dapat diubah saat status Draft')
+      const [rows] = await cx.query<Row[]>('SELECT * FROM payroll_entries WHERE id=? AND run_id=? FOR UPDATE',[entryId,runId])
+      const previous=rows[0]
+      if (!previous) throw new NotFoundError('Baris pegawai tidak ditemukan')
+      const allowed = ['variable_allowance','overtime','bonus','thr','rapel','reimbursement','absence_deduction','loan_deduction','other_deduction','pph21_override','pph21_override_reason','reimbursement_taxable','absence_reduces_tax'].filter(k=>input[k]!==undefined)
+      const next = {...previous,...Object.fromEntries(allowed.map(k=>[k,input[k]]))}
+      if (allowed.length) await cx.query(`UPDATE payroll_entries SET ${allowed.map(k=>k+'=?').join(',')} WHERE id=?`,[...allowed.map(k=>input[k]),entryId])
+      if (input.custom_components!==undefined) await new PayrollComponentService().replaceLines(cx,companyId,run,next,input.custom_components)
+
+      if (actor) await new AuditService().log(cx,{companyId,userId:actor.userId,module:'payroll',action:'entry_components_update',recordType:'payroll_entry',recordId:entryId,oldValue:previous,newValue:input,requestId:actor.requestId,ip:actor.ip})
+      return {id:entryId}
+    })
   }
 
   private expectedTerCategory(ptkp: string) {
@@ -233,6 +450,7 @@ export class PayrollService {
         employee_number: String(entry.employee_number),
         name: String(entry.name),
       }
+
       const expected = this.expectedTerCategory(entry.ptkp_status)
       if (!expected)
         issues.push({
@@ -293,7 +511,7 @@ export class PayrollService {
         })
       if (policy && runStatus !== 'draft') {
         const expectedBpjs = calculateBpjs(
-          num(entry.basic_salary) + num(entry.fixed_allowance),
+          entry.bpjs_salary_base != null ? num(entry.bpjs_salary_base) : num(entry.basic_salary) + num(entry.fixed_allowance),
           policy,
         )
         const comparisons: Array<[string, number, unknown]> = [
@@ -493,15 +711,21 @@ export class PayrollService {
         `SELECT e.*,m.employee_number,m.name,m.ter_category,m.ptkp_status,m.termination_date,m.hire_date,m.prior_year_income,m.prior_year_tax FROM payroll_entries e JOIN payroll_employees m ON m.id=e.employee_id WHERE e.run_id=?`,
         [id],
       )
+      await new PayrollComponentService().validateSources(cx,companyId,id)
+      const [componentRows]=await cx.query<Row[]>('SELECT c.* FROM payroll_entry_components c JOIN payroll_entries e ON e.id=c.entry_id WHERE e.run_id=?',[id])
+      const componentsByEntry=new Map<number,Row[]>()
+      for (const c of componentRows) { const rows=componentsByEntry.get(Number(c.entry_id))??[]; rows.push(c);componentsByEntry.set(Number(c.entry_id),rows) }
       const [ytdRows] = await cx.query<Row[]>(
         `SELECT pe.employee_id,COALESCE(SUM(pe.taxable_gross),0) gross,COALESCE(SUM(pe.pph21),0) tax,COALESCE(SUM(pe.bpjs_jht_employee+pe.bpjs_jp_employee),0) pension FROM payroll_entries pe JOIN payroll_runs pr ON pr.id=pe.run_id WHERE pr.company_id=? AND pr.period>=CONCAT(LEFT(? ,4),'-01') AND pr.period<? AND pr.status IN ('calculated','approved','posted','paid','locked') GROUP BY pe.employee_id`,
         [companyId, run.period, run.period],
       )
       const ytd = new Map(ytdRows.map((row) => [Number(row.employee_id), row]))
       for (const e of entries) {
-        const gross = round(
-          num(e.basic_salary) +
-            num(e.fixed_allowance) +
+        const paidBasic=Number(e.basic_salary),paidAllowance=Number(e.fixed_allowance)
+        const custom=componentTotals(componentsByEntry.get(Number(e.id))??[])
+        const legacyGross = round(
+          paidBasic +
+            paidAllowance +
             num(e.variable_allowance) +
             num(e.overtime) +
             num(e.bonus) +
@@ -509,7 +733,8 @@ export class PayrollService {
             num(e.rapel) +
             num(e.reimbursement),
         )
-        const bpjsBase = num(e.basic_salary) + num(e.fixed_allowance),
+        const gross=round(legacyGross+custom.earnings)
+        const bpjsBase = (run.prorate_bpjs ? paidBasic+paidAllowance : num(e.basic_salary)+num(e.fixed_allowance)) + custom.bpjs,
           bpjs = calculateBpjs(bpjsBase, p)
         const he = bpjs.healthEmployee,
           je = bpjs.jhtEmployee,
@@ -521,15 +746,15 @@ export class PayrollService {
           jkm = bpjs.jkmEmployer
         const employeeBpjs = he + je + pe,
           employerBpjs = hc + jc + pc + jkk + jkm,
-          taxable = round(gross + hc + jkk + jkm)
+          taxable = Math.max(0,round(legacyGross - (e.reimbursement_taxable ? 0 : num(e.reimbursement)) - (e.absence_reduces_tax ? num(e.absence_deduction) : 0) + custom.taxable + hc + jkk + jkm))
         const terCategory = this.expectedTerCategory(e.ptkp_status) ?? e.ter_category
         let rate = this.terFallback(terCategory, taxable),
           pph = round(taxable * rate),
           note = `PPh 21 dihitung dengan TER ${terCategory} berdasarkan PTKP ${e.ptkp_status}`
         const terminationInPeriod =
-          e.termination_date &&
-          dateOnly(e.termination_date) >= dateOnly(run.date_from) &&
-          dateOnly(e.termination_date) <= dateOnly(run.date_to)
+          e.employment_to &&
+          dateOnly(e.employment_to) >= dateOnly(run.date_from) &&
+          dateOnly(e.employment_to) <= dateOnly(run.date_to)
         if (run.period.endsWith('-12') || terminationInPeriod) {
           const previous = ytd.get(Number(e.employee_id)),
             annualGross = num(e.prior_year_income) + num(previous?.gross) + taxable
@@ -552,9 +777,9 @@ export class PayrollService {
           note = 'PPh 21 memakai koreksi manual yang dicatat pengguna'
         }
         const operational = round(
-            num(e.absence_deduction) + num(e.loan_deduction) + num(e.other_deduction),
+            num(e.absence_deduction) + num(e.loan_deduction) + num(e.other_deduction) + custom.deductions,
           ),
-          thp = round(gross - operational - employeeBpjs - pph),
+          thp = round(legacyGross + custom.payrollCash - operational - employeeBpjs - pph),
           cost = round(gross - num(e.absence_deduction) + employerBpjs)
         if (thp < 0) throw new ValidationError('Take home pay tidak boleh negatif')
         await cx.query(
@@ -581,9 +806,11 @@ export class PayrollService {
             e.id,
           ],
         )
+        await cx.query('UPDATE payroll_entries SET paid_basic_salary=?,paid_fixed_allowance=?,proration_ratio=?,eligible_days=?,period_days=? WHERE id=?',[paidBasic,paidAllowance,1,0,0,e.id])
+        await cx.query('UPDATE payroll_entries SET cash_earnings=?,noncash_earnings=?,external_earnings=?,custom_earnings=?,custom_deductions=?,bpjs_salary_base=? WHERE id=?',[round(legacyGross+custom.cash),custom.noncash,custom.external,custom.earnings,custom.deductions,bpjsBase,e.id])
       }
       await cx.query(
-        `UPDATE payroll_runs r JOIN (SELECT run_id,SUM(gross_earnings) gross,SUM(operational_deductions) deductions,SUM(employee_bpjs) employee_bpjs,SUM(employer_bpjs) employer_bpjs,SUM(pph21) pph,SUM(take_home_pay) thp,SUM(company_cost) cost FROM payroll_entries WHERE run_id=? GROUP BY run_id) x ON x.run_id=r.id SET r.status='calculated',r.policy_id=?,r.calculation_version='2026.1',r.calculated_at=NOW(),r.total_gross=x.gross,r.total_operational_deductions=x.deductions,r.total_employee_bpjs=x.employee_bpjs,r.total_employer_bpjs=x.employer_bpjs,r.total_pph21=x.pph,r.total_take_home_pay=x.thp,r.total_company_cost=x.cost WHERE r.id=?`,
+        `UPDATE payroll_runs r JOIN (SELECT run_id,SUM(gross_earnings) gross,SUM(operational_deductions) deductions,SUM(employee_bpjs) employee_bpjs,SUM(employer_bpjs) employer_bpjs,SUM(pph21) pph,SUM(take_home_pay) thp,SUM(company_cost) cost FROM payroll_entries WHERE run_id=? GROUP BY run_id) x ON x.run_id=r.id SET r.status='calculated',r.policy_id=?,r.calculation_version='2026.3',r.calculated_at=NOW(),r.total_gross=x.gross,r.total_operational_deductions=x.deductions,r.total_employee_bpjs=x.employee_bpjs,r.total_employer_bpjs=x.employer_bpjs,r.total_pph21=x.pph,r.total_take_home_pay=x.thp,r.total_company_cost=x.cost WHERE r.id=?`,
         [id, p.id, id],
       )
       return this.detailWith(cx, companyId, id)
@@ -594,6 +821,7 @@ export class PayrollService {
     return transaction(async (cx) => {
       const r = await this.runForUpdate(cx, companyId, id)
       if (r.status !== 'calculated') throw new ConflictError('Hitung payroll sebelum persetujuan')
+      await new PayrollComponentService().validateSources(cx,companyId,id)
       const detail = await this.detailWith(cx, companyId, id)
       if (detail.validation.blocking)
         throw new ConflictError(
@@ -657,21 +885,34 @@ export class PayrollService {
       const r = await this.runForUpdate(cx, companyId, id)
       if (r.status !== 'approved')
         throw new ConflictError('Hanya payroll disetujui yang dapat diposting')
-      const p = await this.policy(cx, companyId, dateOnly(r.date_to))
+      const [savedPolicies]=await cx.query<Row[]>('SELECT * FROM payroll_policies WHERE id=? AND company_id=?',[r.policy_id,companyId])
+      const p = savedPolicies[0] ?? await this.policy(cx, companyId, dateOnly(r.date_to))
       const [e] = await cx.query<Row[]>(
-        `SELECT SUM(gross_earnings-absence_deduction) salary,SUM(employer_bpjs) employer,SUM(employee_bpjs+employer_bpjs) bpjs,SUM(pph21) pph,SUM(loan_deduction) loan,SUM(other_deduction) other,SUM(take_home_pay) thp FROM payroll_entries WHERE run_id=?`,
+        `SELECT SUM(gross_earnings-absence_deduction-custom_earnings) salary,SUM(employer_bpjs) employer,SUM(bpjs_health_employer) health_employer,SUM(bpjs_jht_employer+bpjs_jp_employer+bpjs_jkk_employer+bpjs_jkm_employer) employment_employer,SUM(employee_bpjs+employer_bpjs) bpjs,SUM(pph21) pph,SUM(loan_deduction) loan,SUM(other_deduction) other,SUM(take_home_pay) thp FROM payroll_entries WHERE run_id=?`,
         [id],
       )
       const x = e[0]!
       const lines = [
         this.line(p.salary_expense_account_id, num(x.salary), 0, 'Beban gaji'),
-        this.line(p.employer_bpjs_expense_account_id, num(x.employer), 0, 'BPJS perusahaan'),
+        this.line(p.health_employer_expense_account_id || p.employer_bpjs_expense_account_id, num(x.health_employer), 0, 'BPJS Kesehatan perusahaan'),
+        this.line(p.employment_employer_expense_account_id || p.employer_bpjs_expense_account_id, num(x.employment_employer), 0, 'BPJS Ketenagakerjaan perusahaan (JHT, JP, JKK, JKM)'),
         this.line(p.bpjs_payable_account_id, 0, num(x.bpjs), 'Utang BPJS'),
         this.line(p.pph21_payable_account_id, 0, num(x.pph), 'Utang PPh 21'),
         this.line(p.employee_loan_account_id, 0, num(x.loan), 'Potongan pinjaman pegawai'),
         this.line(p.other_deduction_account_id, 0, num(x.other), 'Potongan lainnya'),
         this.line(p.payroll_payable_account_id, 0, num(x.thp), 'Utang gaji'),
       ].filter((l) => l.debit > 0 || l.credit > 0)
+      await new PayrollComponentService().validateSources(cx,companyId,id)
+      const [customLines]=await cx.query<Row[]>('SELECT c.* FROM payroll_entry_components c JOIN payroll_entries e ON e.id=c.entry_id WHERE e.run_id=?',[id])
+      for (const c of customLines) {
+        const snap=readComponentSnapshot(c.snapshot), amount=num(c.amount)
+        if (!amount || snap.channel.startsWith('external_')) continue
+        if (snap.kind==='deduction') lines.push(this.line(snap.contra_account_id,0,amount,snap.name))
+        else {
+          lines.push(this.line(snap.expense_account_id,amount,0,snap.name))
+          if(snap.channel==='noncash')lines.push(this.line(snap.contra_account_id,0,amount,snap.name+' - kewajiban fasilitas'))
+        }
+      }
       const journalId = await this.posting.createPostedJournal(cx, {
         companyId,
         sourceType: 'payroll',
@@ -711,7 +952,8 @@ export class PayrollService {
         throw new ValidationError(
           'Akun pembayaran harus akun aset aktif yang dapat menerima posting',
         )
-      const p = await this.policy(cx, companyId, dateOnly(r.date_to))
+      const [savedPolicies]=await cx.query<Row[]>('SELECT * FROM payroll_policies WHERE id=? AND company_id=?',[r.policy_id,companyId])
+      const p = savedPolicies[0] ?? await this.policy(cx, companyId, dateOnly(r.date_to))
       const journalId = await this.posting.createPostedJournal(cx, {
         companyId,
         sourceType: 'payroll_payment',
@@ -735,6 +977,17 @@ export class PayrollService {
         [journalId, paymentAccountId, actor.userId, id],
       )
       return this.detailWith(cx, companyId, id)
+    })
+  }
+  async unlock(companyId:number,id:number,reason:string,actor:Actor) {
+    if (!reason?.trim() || reason.trim().length<5) throw new ValidationError('Alasan buka kunci minimal 5 karakter')
+    return transaction(async cx=>{
+      const r=await this.runForUpdate(cx,companyId,id)
+      if(r.status!=='locked')throw new ConflictError('Hanya payroll terkunci yang dapat dibuka')
+      if(!r.journal_id || !r.payment_journal_id)throw new ConflictError('Jurnal payroll dan pembayaran harus lengkap sebelum membuka kunci')
+      await cx.query("UPDATE payroll_runs SET status='paid',locked_by=NULL,locked_at=NULL WHERE id=?",[id])
+      await new AuditService().log(cx,{companyId,userId:actor.userId,module:'payroll',action:'unlock',recordType:'payroll_run',recordId:id,oldValue:{status:r.status,locked_by:r.locked_by,locked_at:r.locked_at},newValue:{status:'paid',reason:reason.trim()},requestId:actor.requestId,ip:actor.ip})
+      return this.detailWith(cx,companyId,id)
     })
   }
   async lock(companyId: number, id: number, actor: Actor) {
@@ -771,6 +1024,10 @@ export class PayrollService {
         ['employee_loan_account_id', 'asset', 'Piutang pegawai'],
         ['other_deduction_account_id', 'liability', 'Utang potongan lain'],
       ]
+      for (const field of ['health_employer_expense_account_id','employment_employer_expense_account_id']) {
+        input[field]=input[field]??null
+        if(input[field]!=null)accountRules.push([field,'expense',field.startsWith('health')?'Beban BPJS Kesehatan':'Beban BPJS Ketenagakerjaan'])
+      }
       const accountIds = accountRules.map(([field]) => Number(input[field]))
       const [accounts] = await cx.query<Row[]>(
         `SELECT id,account_type FROM accounts
@@ -836,13 +1093,30 @@ export class PayrollService {
       `SELECT * FROM payroll_policies WHERE id=COALESCE(?,id) AND company_id=? AND effective_from<=? ORDER BY effective_from DESC LIMIT 1`,
       [r.policy_id, companyId, r.date_to],
     )
+    const [attendance]=await cx.query('SELECT a.* FROM payroll_attendance_days a JOIN payroll_entries e ON e.id=a.entry_id WHERE e.run_id=? ORDER BY a.attendance_date',[id])
+    const [components]=await cx.query('SELECT c.* FROM payroll_entry_components c JOIN payroll_entries e ON e.id=c.entry_id WHERE e.run_id=?',[id])
+    const byEntry=new Map<number,any[]>()
+    for (const c of components) { c.snapshot=readComponentSnapshot(c.snapshot);const list=byEntry.get(Number(c.entry_id))??[];list.push(c);byEntry.set(Number(c.entry_id),list) }
+    for (const e of entries) {e.custom_components=byEntry.get(Number(e.id))??[];e.period_from=r.date_from;e.period_to=r.date_to;e.attendance_days=attendance.filter((a:any)=>Number(a.entry_id)===Number(e.id))}
+    const externalAmount=round(entries.reduce((sum:number,e:Row)=>sum+num(e.external_earnings),0))
+    const payrollExpense=round(num(r.total_company_cost)-externalAmount)
+    const [ledgerRows]=await cx.query("SELECT COALESCE(SUM(l.debit-l.credit),0) amount FROM journal_lines l JOIN accounts a ON a.id=l.account_id WHERE l.journal_id=? AND a.account_type='expense'",[r.journal_id])
+    const ledgerActual=num(ledgerRows[0]?.amount)
+    const expenseBridge=new Map<number,{account_id:number;payroll:number;external:number}>()
+    const addExpense=(account:any,amount:number,external=false)=>{const key=Number(account);if(!key||!amount)return;const item=expenseBridge.get(key)??{account_id:key,payroll:0,external:0};if(external)item.external+=amount;else item.payroll+=amount;expenseBridge.set(key,item)}
+    for(const e of entries){addExpense(policies[0]?.salary_expense_account_id,num(e.gross_earnings)-num(e.absence_deduction)-num(e.custom_earnings));addExpense(policies[0]?.health_employer_expense_account_id||policies[0]?.employer_bpjs_expense_account_id,num(e.bpjs_health_employer));addExpense(policies[0]?.employment_employer_expense_account_id||policies[0]?.employer_bpjs_expense_account_id,num(e.bpjs_jht_employer)+num(e.bpjs_jp_employer)+num(e.bpjs_jkk_employer)+num(e.bpjs_jkm_employer))}
+    for(const c of components)if(c.snapshot.kind==='earning')addExpense(c.snapshot.expense_account_id,num(c.amount),c.snapshot.channel.startsWith('external_'))
+    const [actualByAccount]=await cx.query('SELECT l.account_id,SUM(l.debit-l.credit) amount FROM journal_lines l WHERE l.journal_id=? GROUP BY l.account_id',[r.journal_id])
+    const [accountNames]=await cx.query('SELECT id,code,name FROM accounts WHERE company_id=?',[companyId])
+    const expenseAccounts=[...expenseBridge.values()].map(item=>({ ...item, payroll:round(item.payroll),external:round(item.external),account:accountNames.find((a:any)=>Number(a.id)===item.account_id),actual:num(actualByAccount.find((a:any)=>Number(a.account_id)===item.account_id)?.amount),difference:round(item.payroll-num(actualByAccount.find((a:any)=>Number(a.account_id)===item.account_id)?.amount)) }))
     const validation = this.validatePayroll(entries as Row[], policies[0] ?? null, r.status)
     return {
       run: r,
       entries,
       validation,
+      expense_accounts:expenseAccounts,
       reconciliation: {
-        ledger: { amount: num(r.total_company_cost), matched: !!r.journal_id },
+        ledger: { amount: payrollExpense, actual:ledgerActual, external_amount:externalAmount, difference:round(payrollExpense-ledgerActual), matched: !!r.journal_id && Math.abs(payrollExpense-ledgerActual)<0.01 },
         bank: { amount: num(r.total_take_home_pay), matched: !!r.payment_journal_id },
         bpjs: {
           amount: num(r.total_employee_bpjs) + num(r.total_employer_bpjs),

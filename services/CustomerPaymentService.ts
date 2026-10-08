@@ -32,6 +32,8 @@ export class CustomerPaymentService {
   // Create draft payment
   async create(companyId: number, input: PaymentInput, ctx: InvoiceMutationContext) {
     return transaction(async (conn) => {
+      const [companies]=await conn.execute<import('mysql2/promise').RowDataPacket[]>('SELECT base_currency FROM companies WHERE id=?',[companyId])
+      if(input.currency!==companies[0]!.base_currency)throw new ValidationError('Gunakan menu Pelunasan Penjualan untuk penerimaan valas dengan alokasi historis dan jurnal selisih kurs')
       // Ensure open period
       await this.validation.ensureOpenPeriod(conn, companyId, input.payment_date)
 
@@ -151,6 +153,8 @@ export class CustomerPaymentService {
       if (!rec) throw new NotFoundError('Penerimaan piutang tidak ditemukan')
       if (rec.status !== 'approved')
         throw new ConflictError('Hanya pembayaran yang approved dapat diposting')
+      const [companies]=await conn.execute<import('mysql2/promise').RowDataPacket[]>('SELECT base_currency FROM companies WHERE id=?',[companyId])
+      if(rec.currency!==companies[0]!.base_currency)throw new ValidationError('Draft penerimaan valas lama harus dicatat melalui menu Pelunasan Penjualan agar selisih kurs dan nominal bank benar')
 
       // Verify receivable account configuration
       const receivableAccountId = await this.repo.setting(

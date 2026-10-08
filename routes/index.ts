@@ -1,4 +1,6 @@
+import platform from './platform.routes'
 import { Hono } from 'hono'
+import exports from './exports.routes'
 
 import { DashboardController } from '../controllers/DashboardController'
 import { SearchController } from '../controllers/SearchController'
@@ -9,6 +11,7 @@ import {
   accountingPeriodSchema,
   bankAccountSchema,
   costCenterSchema,
+  departmentSchema,
   customerSchema,
   itemSchema,
   projectSchema,
@@ -30,6 +33,7 @@ import roles from './roles.routes'
 import sales from './sales.routes'
 import purchases from './purchase.routes'
 import settings from './settings.routes'
+import preferences from './preferences.routes'
 import users from './users.routes'
 import { auditLogs, errorLogs } from './logs.routes'
 import payroll from './payroll.routes'
@@ -37,10 +41,18 @@ import periodClosing from './period-closing.routes'
 import yearEnd from './year-end.routes'
 import recurringJournals from './recurring-journal.routes'
 import monthEnd from './month-end.routes'
+import accountingSchedules from './accounting-schedule.routes'
+import approvals from './approvals.routes'
+import equity from './equity.routes'
+import openingBalances from './opening-balances.routes'
+import currency from './currency.routes'
 
 const route = new Hono()
 const dashboard = new DashboardController()
 const search = new SearchController()
+
+route.use('/platform/*',authMiddleware)
+route.route('/platform',platform)
 
 route.get('/health', dashboard.health)
 route.route('/auth', auth)
@@ -84,17 +96,32 @@ route.route('/tax-codes', entityRoutes('tax_codes', 'tax-codes', taxCodeSchema))
 route.use('/cost-centers/*', authMiddleware)
 route.route('/cost-centers', entityRoutes('cost_centers', 'cost-centers', costCenterSchema))
 
+route.use('/departments/*',authMiddleware)
+route.route('/departments',entityRoutes('departments','departments',departmentSchema))
+
 route.use('/projects/*', authMiddleware)
 route.route('/projects', entityRoutes('projects', 'projects', projectSchema))
 
 route.use('/bank-accounts/*', authMiddleware)
 route.route('/bank-accounts', entityRoutes('bank_accounts', 'bank-accounts', bankAccountSchema))
+route.use('/currency/*',authMiddleware)
+route.route('/currency',currency)
 
 route.use('/journals/*', authMiddleware)
 route.route('/journals', journals)
+route.use('/equity/*', authMiddleware)
+route.route('/equity', equity)
+route.use('/opening-balances/*', authMiddleware)
+route.route('/opening-balances', openingBalances)
 
 route.use('/recurring-journals/*', authMiddleware)
 route.route('/recurring-journals', recurringJournals)
+
+route.use('/accounting-schedules/*', authMiddleware)
+route.route('/accounting-schedules', accountingSchedules)
+
+route.use('/approvals/*', authMiddleware)
+route.route('/approvals', approvals)
 
 route.use('/inventory/*', authMiddleware)
 route.route('/inventory', inventory)
@@ -133,10 +160,14 @@ route.route('/permissions', permissions)
 
 route.use('/settings/*', authMiddleware)
 route.route('/settings', settings)
+route.use('/preferences/*', authMiddleware)
+route.route('/preferences', preferences)
 
 route.use('/audit-logs/*', authMiddleware)
 route.route('/audit-logs', auditLogs)
 route.use('/error-logs/*', authMiddleware)
 route.route('/error-logs', errorLogs)
 
+route.use('/exports/*', authMiddleware)
+route.route('/exports', exports)
 export default route

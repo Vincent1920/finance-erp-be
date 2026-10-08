@@ -1,0 +1,6 @@
+import type { MigrationDatabase } from './helpers'
+export const migration={name:'044_fx_asset_policy',async up(db:MigrationDatabase){
+ await db.query("ALTER TABLE fixed_assets MODIFY COLUMN depreciation_method ENUM('straight_line','declining_balance') NOT NULL DEFAULT 'straight_line'")
+ for(const [key,value,type] of [ ['accounting.fx_rate_policy','manual','string'],['accounting.fx_max_rate_age_days','7','number'],['accounting.fx_rate_source','','string'],['accounting.asset_capitalization_threshold','0','number'],['accounting.default_asset_life_months','48','number'],['accounting.default_depreciation_method','straight_line','string'] ])await db.query(`INSERT INTO settings(company_id,setting_key,setting_value,value_type,category,is_secret) SELECT id,'${key}','${value}','${type}','accounting',0 FROM companies ON DUPLICATE KEY UPDATE setting_key=VALUES(setting_key)`)
+ for(const key of ['accounting.fx_unrealized_gain_account_id','accounting.fx_unrealized_loss_account_id'])await db.query(`INSERT INTO settings(company_id,setting_key,setting_value,value_type,category,is_secret) SELECT id,'${key}',NULL,'account_id','accounting',0 FROM companies ON DUPLICATE KEY UPDATE setting_key=VALUES(setting_key)`)
+},async down(){throw new Error('Kebijakan aset historis wajib dipertahankan')}}

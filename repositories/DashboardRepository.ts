@@ -21,6 +21,8 @@ export interface DashboardSummary {
     lowStockItems: number
     unfinishedPayroll: number
     periodsToClose: number
+    missingDepreciation: number
+    approvedUnposted: number
   }
   monthly: Array<{ month: string; sales: number; purchases: number }>
   recentJournals: Array<{
@@ -72,13 +74,13 @@ export class DashboardRepository {
          SELECT DATE_FORMAT(invoice_date, '%Y-%m') AS month_key, SUM(base_grand_total) AS sales, 0 AS purchases
          FROM sales_invoices
          WHERE company_id = ? AND status IN ('posted', 'partially_paid', 'paid')
-           AND invoice_date >= DATE_SUB(DATE_FORMAT(CURRENT_DATE, '%Y-%m-01'), INTERVAL 5 MONTH)
+           AND invoice_date >= DATE_SUB(DATE_FORMAT(DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+07:00')), '%Y-%m-01'), INTERVAL 5 MONTH)
          GROUP BY DATE_FORMAT(invoice_date, '%Y-%m')
          UNION ALL
          SELECT DATE_FORMAT(invoice_date, '%Y-%m') AS month_key, 0 AS sales, SUM(base_grand_total) AS purchases
          FROM purchase_invoices
          WHERE company_id = ? AND status IN ('posted', 'partially_paid', 'paid')
-           AND invoice_date >= DATE_SUB(DATE_FORMAT(CURRENT_DATE, '%Y-%m-01'), INTERVAL 5 MONTH)
+           AND invoice_date >= DATE_SUB(DATE_FORMAT(DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+07:00')), '%Y-%m-01'), INTERVAL 5 MONTH)
          GROUP BY DATE_FORMAT(invoice_date, '%Y-%m')
        ) activity
        GROUP BY month_key
@@ -87,16 +89,26 @@ export class DashboardRepository {
     )
     const [workRows] = await db.execute<RowDataPacket[]>(
       `SELECT
-        (SELECT COUNT(*) FROM sales_invoices WHERE company_id=? AND status IN ('posted','partially_paid') AND outstanding_amount>0 AND due_date<CURRENT_DATE) overdueInvoices,
-        (SELECT COUNT(*) FROM sales_invoices WHERE company_id=? AND status IN ('posted','partially_paid') AND outstanding_amount>0 AND due_date BETWEEN CURRENT_DATE AND DATE_ADD(CURRENT_DATE, INTERVAL 7 DAY)) receivablesDueThisWeek,
-        (SELECT COUNT(*) FROM purchase_invoices WHERE company_id=? AND status IN ('posted','partially_paid') AND outstanding_amount>0 AND due_date BETWEEN CURRENT_DATE AND DATE_ADD(CURRENT_DATE, INTERVAL 7 DAY)) payablesDueThisWeek,
+        (SELECT COUNT(*) FROM sales_invoices WHERE company_id=? AND status IN ('posted','partially_paid') AND outstanding_amount>0 AND due_date<DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+07:00'))) overdueInvoices,
+        (SELECT COUNT(*) FROM sales_invoices WHERE company_id=? AND status IN ('posted','partially_paid') AND outstanding_amount>0 AND due_date BETWEEN DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+07:00')) AND DATE_ADD(DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+07:00')), INTERVAL 7 DAY)) receivablesDueThisWeek,
+        (SELECT COUNT(*) FROM purchase_invoices WHERE company_id=? AND status IN ('posted','partially_paid') AND outstanding_amount>0 AND due_date BETWEEN DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+07:00')) AND DATE_ADD(DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+07:00')), INTERVAL 7 DAY)) payablesDueThisWeek,
         (SELECT COUNT(*) FROM approval_requests WHERE company_id=? AND status='pending') pendingApprovals,
         (SELECT COUNT(*) FROM bank_statement_lines l JOIN bank_statements s ON s.id=l.bank_statement_id WHERE s.company_id=? AND l.reconciliation_status IN ('unmatched','partial')) unmatchedBankLines,
         (SELECT COUNT(*) FROM tax_reconciliation_periods WHERE company_id=? AND status<>'locked') openTaxPeriods,
         (SELECT COUNT(*) FROM items i LEFT JOIN (SELECT company_id,item_id,SUM(quantity) quantity FROM inventory_balances GROUP BY company_id,item_id) b ON b.company_id=i.company_id AND b.item_id=i.id WHERE i.company_id=? AND i.item_type='inventory' AND i.is_active=TRUE AND i.deleted_at IS NULL AND i.minimum_stock>0 AND COALESCE(b.quantity,0)<i.minimum_stock) lowStockItems,
-        (SELECT COUNT(*) FROM payroll_runs WHERE company_id=? AND period=DATE_FORMAT(CURRENT_DATE,'%Y-%m') AND status<>'locked') unfinishedPayroll,
-        (SELECT COUNT(*) FROM accounting_periods WHERE company_id=? AND status<>'closed' AND end_date<=LAST_DAY(CURRENT_DATE)) periodsToClose`,
-      [companyId, companyId, companyId, companyId, companyId, companyId, companyId, companyId, companyId],
+        (SELECT COUNT(*) FROM payroll_runs WHERE company_id=? AND period=DATE_FORMAT(DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+07:00')),'%Y-%m') AND status<>'locked') unfinishedPayroll,
+        (SELECT COUNT(*) FROM accounting_periods WHERE company_id=? AND status IN('open','soft_closed') AND end_date<DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+07:00'))) periodsToClose`,
+      [
+        companyId,
+        companyId,
+        companyId,
+        companyId,
+        companyId,
+        companyId,
+        companyId,
+        companyId,
+        companyId,
+      ],
     )
     const [journalRows] = await db.execute<RowDataPacket[]>(
       `SELECT id, journal_number, journal_date, description, total_debit, status
@@ -104,8 +116,17 @@ export class DashboardRepository {
        ORDER BY journal_date DESC, id DESC LIMIT 6`,
       [companyId],
     )
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' })
+    const [extraWork] = await db.execute<RowDataPacket[]>(
+      `SELECT (SELECT COUNT(*) FROM journals WHERE company_id=? AND status='approved' AND journal_date<=?) approved_unposted,
+       (SELECT COUNT(*) FROM fixed_assets a WHERE a.company_id=? AND a.deleted_at IS NULL AND a.status='active' AND a.in_service_date<=LAST_DAY(DATE_SUB(?,INTERVAL 1 MONTH))
+       AND COALESCE((SELECT SUM(d.depreciation_amount) FROM asset_depreciations d WHERE d.company_id=a.company_id AND d.fixed_asset_id=a.id AND d.status='posted'),0)<a.purchase_cost-a.salvage_value
+       AND NOT EXISTS(SELECT 1 FROM asset_depreciations d WHERE d.company_id=a.company_id AND d.fixed_asset_id=a.id AND d.status='posted' AND DATE_FORMAT(d.depreciation_date,'%Y-%m')=DATE_FORMAT(DATE_SUB(?,INTERVAL 1 MONTH),'%Y-%m'))) missing_depreciation`,
+      [companyId, today, companyId, today, today],
+    )
 
-    const row = rows[0], work = workRows[0]
+    const row = rows[0],
+      work = workRows[0]
 
     return {
       customers: Number(row?.customers ?? 0),
@@ -126,6 +147,8 @@ export class DashboardRepository {
         lowStockItems: Number(work?.lowStockItems ?? 0),
         unfinishedPayroll: Number(work?.unfinishedPayroll ?? 0),
         periodsToClose: Number(work?.periodsToClose ?? 0),
+        missingDepreciation: Number(extraWork[0]?.missing_depreciation ?? 0),
+        approvedUnposted: Number(extraWork[0]?.approved_unposted ?? 0),
       },
       monthly: monthlyRows.map((entry) => ({
         month: String(entry.month),
